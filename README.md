@@ -1,0 +1,153 @@
+# 微博更新转发到 Telegram
+
+监控配置中的微博账号。发现新微博后下载原图、普通视频和 Live Photo 的静态原图及动态 `.mov/.mp4` 文件，再转发到指定 Telegram 频道。
+
+抓取顺序为匿名移动端、匿名桌面端、Cookie 移动端、Cookie 桌面端。匿名接口被风控后会进入 10 分钟冷却期，其间直接使用 Cookie；未配置 Cookie 时会输出明确错误。
+
+## Mac 本地测试
+
+```bash
+git clone https://github.com/cq375/weibo-tg-forwarder.git
+cd weibo-tg-forwarder
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+cp .env.example .env
+cp config.example.yml config.yml
+```
+
+先检查匿名抓取，不下载媒体：
+
+```bash
+weibo-tg doctor
+weibo-tg preview --no-download --limit 1
+```
+
+如果匿名接口返回 `432`、`403` 或要求登录，在 `.env` 中填写 `WEIBO_COOKIE`。Cookie 可从浏览器开发者工具的微博网络请求中复制完整的 `Cookie` 请求头，建议使用专用微博账号，不需要把账号密码写进配置。
+
+验证原图、视频和 Live Photo 下载：
+
+```bash
+weibo-tg preview --limit 1
+```
+
+文件会保存到 `data/media/<UID>/<微博ID>/`。Live Photo 会包含一张原图和一个 `.mov` 或 `.mp4` 动态文件。Telegram Bot API 不支持原生 Live Photo 对象，因此频道中会按“静态照片 + 动态视频/文件”发送，原始资源均保留。
+
+## 配置 Telegram
+
+在 `.env` 中设置：
+
+```dotenv
+WEIBO_COOKIE=完整微博Cookie，可留空
+TELEGRAM_BOT_TOKEN=BotFather提供的Token
+TELEGRAM_CHANNEL_ID=@频道用户名或-100开头的频道ID
+TELEGRAM_ALERT_CHAT_ID=私聊安全模式使用的管理员数字ID
+```
+
+Bot 必须加入目标频道并具有发布消息权限。运行检查：
+
+```bash
+weibo-tg doctor
+```
+
+管理员先在 Telegram 私聊 Bot 并发送 `/start`，然后查询私聊 ID：
+
+```bash
+weibo-tg telegram-chats
+```
+
+私聊安全模式下，把输出的数字写入 `.env` 的 `TELEGRAM_ALERT_CHAT_ID`。当前项目已在 `config.yml` 设置 `notifications_use_channel: true`，因此健康告警、登录二维码和普通微博都会发送到 `TELEGRAM_CHANNEL_ID`，私聊 ID 会被忽略。
+
+立即将某个账号的最新微博发送到频道，用于完整链路测试：
+
+```bash
+weibo-tg test-send --uid <配置中的微博UID> --keep-media
+```
+
+该命令会真实发布 Telegram 消息，但不会写入正式监控的去重数据库。去掉 `--keep-media` 后，发送成功即删除本次下载文件。
+
+首次正式启动只记录当前已有微博，不会转发历史内容：
+
+```bash
+weibo-tg run --once
+```
+
+持续监控：
+
+```bash
+weibo-tg run
+```
+
+默认每 `120 ± 60` 秒轮询一次，即每 `1-3` 分钟检查。成功发送后删除本地媒体；将 `config.yml` 中的 `keep_media_after_send` 改为 `true` 可长期保留。
+
+任一目标账号连续 `3` 轮抓取失败时，服务会向目标 Telegram 频道发送告警；故障持续时每 `6` 小时提醒一次；全部恢复后发送恢复通知。告警状态保存在 SQLite 中，容器重启不会重复刷屏。
+
+### Cookie 自动扫码续期
+
+连续抓取失败 `3` 轮后，服务会启动一次无头 Chromium，在微博转发频道发送登录二维码。使用微博 App 扫码并确认后，程序会验证两个目标 UID，把新登录态保存到 `data/weibo_cookie.txt`，并立即恢复当前监控进程。二维码在成功或超时后会从服务器删除，系统不会保存微博账号、密码或验证码。登录二维码相当于一次性登录凭证，只有在转发频道成员完全可信时才应启用 `notifications_use_channel: true`；关闭后会恢复管理员私聊安全模式。
+
+扫码等待时间默认 `300` 秒；超时后 `6` 小时再尝试。持久化 Cookie 的优先级高于 `.env`。需要改回手工 Cookie 时，先删除 `data/weibo_cookie.txt`，再修改 `.env` 并重启容器。
+
+可以主动测试扫码流程：
+
+```bash
+docker compose run --rm weibo-tg \
+  weibo-tg --config /app/config.yml refresh-cookie
+docker compose restart weibo-tg
+```
+
+测试命令会把二维码发送到 Telegram，并等待扫码。验证成功后重启后台容器，使其读取新 Cookie 文件。
+
+## Docker 部署
+
+```bash
+docker compose build
+docker compose up -d
+docker compose logs -f
+```
+
+数据保存在宿主机的 `data/`。日本 IP 可以使用；实际稳定性取决于微博风控，建议保留可用 Cookie 作为回退。
+
+### 上传到 Linux 服务器
+
+在 Mac 项目目录执行，替换服务器地址和用户名：
+
+```bash
+SERVER=user@服务器IP
+ssh "$SERVER" 'mkdir -p ~/weibo-tg'
+rsync -az \
+  --exclude '.git' \
+  --exclude '.idea' \
+  --exclude '.venv' \
+  --exclude '.pytest_cache' \
+  --exclude 'data' \
+  --exclude '.env' \
+  ./ "$SERVER:~/weibo-tg/"
+scp .env "$SERVER:~/weibo-tg/.env"
+ssh "$SERVER" 'chmod 600 ~/weibo-tg/.env'
+```
+
+服务器安装并启动 Docker 后执行：
+
+```bash
+cd ~/weibo-tg
+docker compose build
+docker compose run --rm weibo-tg \
+  weibo-tg --config /app/config.yml doctor
+docker compose run --rm weibo-tg \
+  weibo-tg --config /app/config.yml run --once
+docker compose up -d
+docker compose logs -f --tail=100
+```
+
+`run --once` 在服务器创建首次基线，不转发历史微博。Compose 使用 `restart: unless-stopped`，并将日志限制为最多 `5 × 10 MB`。还需要确保 Docker 服务随系统启动：
+
+```bash
+sudo systemctl enable --now docker
+```
+
+## 测试
+
+```bash
+pytest
+```

@@ -1,0 +1,29 @@
+weibo:
+  targets:
+    - uid: "1000000001"
+    - uid: "1000000002"
+  poll_interval_seconds: 120
+  poll_jitter_seconds: 60
+  anonymous_retry_seconds: 86400
+  max_pages: 5
+  request_timeout_seconds: 25
+
+telegram:
+  api_base: "https://api.telegram.org"
+  request_timeout_seconds: 90
+  notifications_use_channel: true
+
+storage:
+  database: "./data/state.sqlite3"
+  media_directory: "./data/media"
+  cookie_file: "./data/weibo_cookie.txt"
+  keep_media_after_send: false
+  max_download_megabytes: 2000
+
+service:
+  bootstrap_mode: "seed"
+  alert_after_consecutive_failures: 3
+  alert_repeat_seconds: 21600
+  cookie_refresh_enabled: true
+  cookie_refresh_timeout_seconds: 300
+  cookie_refresh_cooldown_seconds: 21600
