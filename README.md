@@ -41,7 +41,7 @@ weibo-tg preview --limit 1
 WEIBO_COOKIE=完整微博Cookie，可留空
 TELEGRAM_BOT_TOKEN=BotFather提供的Token
 TELEGRAM_CHANNEL_ID=@频道用户名或-100开头的频道ID
-TELEGRAM_ALERT_CHAT_ID=私聊安全模式使用的管理员数字ID
+TELEGRAM_ALERT_CHAT_ID=管理员与 Bot 私聊的数字 ID
 ```
 
 Bot 必须加入目标频道并具有发布消息权限。运行检查：
@@ -56,7 +56,7 @@ weibo-tg doctor
 weibo-tg telegram-chats
 ```
 
-私聊安全模式下，把输出的数字写入 `.env` 的 `TELEGRAM_ALERT_CHAT_ID`。当前项目已在 `config.yml` 设置 `notifications_use_channel: true`，因此健康告警、登录二维码和普通微博都会发送到 `TELEGRAM_CHANNEL_ID`，私聊 ID 会被忽略。
+把输出的数字写入 `.env` 的 `TELEGRAM_ALERT_CHAT_ID`。当前项目已在 `config.yml` 设置 `notifications_use_channel: true`，因此健康告警、登录二维码和普通微博都会发送到 `TELEGRAM_CHANNEL_ID`；这个私聊 ID 仍然用于授权管理员命令。
 
 立即将某个账号的最新微博发送到频道，用于完整链路测试：
 
@@ -97,6 +97,16 @@ docker compose restart weibo-tg
 ```
 
 测试命令会把二维码发送到 Telegram，并等待扫码。验证成功后重启后台容器，使其读取新 Cookie 文件。
+
+常驻服务运行时，可以直接在上面配置的管理员私聊中发送以下任一命令重新扫码：
+
+```text
+/refresh_cookie
+```
+
+也接受 `/refresh-cookie` 和 `/refresh`。二维码仍按现有通知路由发送：`notifications_use_channel: true` 时发送到微博转发频道，否则发送到管理员私聊。扫码成功后，运行中的监控会立即替换内存中的登录态并写入 `data/weibo_cookie.txt`，不需要重启容器。服务启动时会忽略启动前积压的旧 Telegram 消息，避免旧 `/start` 或旧刷新命令被误执行。
+
+不要在常驻服务运行时同时执行 `telegram-chats`，两个进程都会读取 Telegram `getUpdates`，可能互相抢消息。
 
 ## Docker 部署
 

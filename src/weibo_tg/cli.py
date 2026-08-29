@@ -107,15 +107,14 @@ def _doctor(config) -> int:
             print(f"Telegram：正常，Bot @{bot.get('username', 'unknown')}")
             if config.telegram.notifications_use_channel:
                 print("Telegram 通知和登录二维码：与微博转发频道一致")
-            else:
-                print(
-                    "Telegram 管理员私聊："
-                    + (
-                        "已配置"
-                        if config.telegram.alert_chat_id
-                        else "未配置，无法自动发送登录二维码"
-                    )
+            print(
+                "Telegram 管理员私聊命令："
+                + (
+                    "已配置，可发送 /refresh_cookie"
+                    if config.telegram.alert_chat_id
+                    else "未配置，无法从 Telegram 手动发起扫码"
                 )
+            )
         except Exception as exc:
             failed = True
             print(f"Telegram：失败，{exc}")

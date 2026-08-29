@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from contextlib import ExitStack
 from datetime import datetime
@@ -25,40 +26,82 @@ class TelegramClient:
     def __init__(self, config: TelegramConfig):
         self.config = config
         self.session = requests.Session()
+        # Long polling may wait for up to 20 seconds. Keep it on a separate
+        # session so a pending getUpdates call cannot delay a QR or alert send.
+        self.poll_session = requests.Session()
+        self._send_lock = threading.Lock()
         self.base_url = f"{config.api_base}/bot{config.bot_token}"
+        self.bot_username = ""
+
+    def get_me(self) -> dict[str, Any]:
+        result = self._call("getMe")
+        if not isinstance(result, dict):
+            raise TelegramError("Telegram getMe 返回结构异常")
+        username = result.get("username")
+        if username:
+            self.bot_username = str(username)
+        return result
 
     def verify(self) -> dict[str, Any]:
-        result = self._call("getMe")
+        result = self.get_me()
         self._call("getChat", {"chat_id": self.config.channel_id})
-        if not self.config.notifications_use_channel and self.config.alert_chat_id:
+        if self.config.alert_chat_id:
             alert_chat = self._call("getChat", {"chat_id": self.config.alert_chat_id})
             if not isinstance(alert_chat, dict) or alert_chat.get("type") != "private":
                 raise TelegramError("TELEGRAM_ALERT_CHAT_ID 必须是管理员与 Bot 的私聊 ID")
         return result if isinstance(result, dict) else {}
 
-    def list_private_chats(self) -> list[dict[str, Any]]:
-        result = self._call(
-            "getUpdates",
-            {"limit": 100, "timeout": 0, "allowed_updates": json.dumps(["message"])},
+    def get_updates(
+        self,
+        offset: int | None = None,
+        timeout: int = 25,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch message updates with a bounded long-poll timeout."""
+        # Keep the HTTP timeout longer than Telegram's long-poll timeout. The
+        # config has a minimum of 10 seconds, so this also works in tests and
+        # small deployments with a short request timeout.
+        poll_timeout = max(
+            0,
+            min(int(timeout), max(0, self.config.request_timeout_seconds - 5)),
         )
+        data: dict[str, Any] = {
+            "limit": max(1, min(int(limit), 100)),
+            "timeout": poll_timeout,
+            "allowed_updates": json.dumps(["message"]),
+        }
+        if offset is not None:
+            data["offset"] = int(offset)
+        result = self._call("getUpdates", data)
+        return (
+            [item for item in result if isinstance(item, dict)]
+            if isinstance(result, list)
+            else []
+        )
+
+    def list_private_chats(self) -> list[dict[str, Any]]:
+        result = self.get_updates(timeout=0, limit=100)
         chats: dict[str, dict[str, Any]] = {}
-        for update in result if isinstance(result, list) else []:
+        for update in result:
             message = update.get("message") if isinstance(update, dict) else None
             chat = message.get("chat") if isinstance(message, dict) else None
             if isinstance(chat, dict) and chat.get("type") == "private" and chat.get("id"):
                 chats[str(chat["id"])] = chat
         return list(chats.values())
 
-    def send_alert(self, text: str) -> list[int]:
+    def send_message(self, chat_id: str, text: str) -> list[int]:
         result = self._call(
             "sendMessage",
             {
-                "chat_id": self._notification_chat_id(),
+                "chat_id": chat_id,
                 "text": text,
                 "link_preview_options": json.dumps({"is_disabled": True}),
             },
         )
         return self._message_ids(result)
+
+    def send_alert(self, text: str) -> list[int]:
+        return self.send_message(self._notification_chat_id(), text)
 
     def send_qr_code(self, path: Path, caption: str) -> list[int]:
         target_chat_id = self._notification_chat_id(require_private_fallback=True)
@@ -197,6 +240,24 @@ class TelegramClient:
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
     ) -> Any:
+        if method == "getUpdates":
+            return self._request(method, data, files, self.poll_session)
+        with self._send_lock:
+            return self._request(method, data, files, self.session)
+
+    def _request(
+        self,
+        method: str,
+        data: dict[str, Any] | None,
+        files: dict[str, Any] | None,
+        request_session: requests.Session,
+    ) -> Any:
+        request_timeout = self.config.request_timeout_seconds
+        if method == "getUpdates" and data is not None:
+            request_timeout = min(
+                request_timeout,
+                max(5, int(data.get("timeout", 0)) + 5),
+            )
         last_error = ""
         for attempt in range(1, 4):
             if files:
@@ -204,11 +265,11 @@ class TelegramClient:
                     if hasattr(value, "seek"):
                         value.seek(0)
             try:
-                response = self.session.post(
+                response = request_session.post(
                     f"{self.base_url}/{method}",
                     data=data,
                     files=files,
-                    timeout=self.config.request_timeout_seconds,
+                    timeout=request_timeout,
                 )
                 try:
                     payload = response.json()
@@ -273,3 +334,25 @@ class TelegramClient:
             chunks.append(remaining[:boundary].rstrip())
             remaining = remaining[boundary:].lstrip()
         return chunks
+
+    @staticmethod
+    def is_refresh_command(text: Any, bot_username: str = "") -> bool:
+        """Return whether the first token is an accepted cookie-refresh command."""
+        if not isinstance(text, str):
+            return False
+        parts = text.strip().split(maxsplit=1)
+        if not parts:
+            return False
+        token = parts[0]
+        if not token.startswith("/"):
+            return False
+        command, separator, mention = token.partition("@")
+        if command.casefold() not in {"/refresh-cookie", "/refresh_cookie", "/refresh"}:
+            return False
+        if separator and not mention:
+            return False
+        if separator and (
+            not bot_username or mention.casefold() != bot_username.casefold()
+        ):
+            return False
+        return True

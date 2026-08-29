@@ -99,3 +99,51 @@ def test_lists_private_bot_chats(monkeypatch):
     assert client.list_private_chats() == [
         {"id": 123, "type": "private", "username": "admin"}
     ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["/refresh", "/refresh_cookie", "/refresh-cookie", "/REFRESH_COOKIE now"],
+)
+def test_accepts_refresh_command_aliases(text):
+    assert TelegramClient.is_refresh_command(text)
+
+
+def test_accepts_command_for_this_bot_only():
+    assert TelegramClient.is_refresh_command("/refresh_cookie@taopli_bot", "taopli_bot")
+    assert not TelegramClient.is_refresh_command("/refresh_cookie@other_bot", "taopli_bot")
+    assert not TelegramClient.is_refresh_command("/refresh_cookie@taopli_bot", "")
+
+
+@pytest.mark.parametrize("text", ["refresh_cookie", "/refresh-cookie@", "/refresh-cookie-now"])
+def test_rejects_invalid_refresh_commands(text):
+    assert not TelegramClient.is_refresh_command(text)
+
+
+def test_get_updates_passes_offset_and_allowed_updates(monkeypatch):
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    calls = []
+
+    def call(method, data=None, files=None):
+        calls.append((method, data, files))
+        return [{"update_id": 8, "message": {}}]
+
+    monkeypatch.setattr(client, "_call", call)
+
+    assert client.get_updates(offset=9, timeout=20, limit=200) == [
+        {"update_id": 8, "message": {}}
+    ]
+    assert calls == [
+        (
+            "getUpdates",
+            {
+                "offset": 9,
+                "limit": 100,
+                "timeout": 20,
+                "allowed_updates": '["message"]',
+            },
+            None,
+        )
+    ]
