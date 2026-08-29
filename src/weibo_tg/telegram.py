@@ -22,6 +22,14 @@ class TelegramError(RuntimeError):
     pass
 
 
+class TelegramDeliveryUnconfirmed(TelegramError):
+    """A write may have reached Telegram, so repeating it could duplicate content."""
+
+
+class TelegramDeliveryRetryable(TelegramError):
+    """Telegram explicitly rejected a write before delivery, so a later retry is safe."""
+
+
 class TelegramClient:
     def __init__(self, config: TelegramConfig):
         self.config = config
@@ -174,6 +182,8 @@ class TelegramClient:
                         {"photo": handle},
                     )
                 return self._message_ids(result)
+            except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+                raise
             except TelegramError:
                 LOGGER.warning("图片无法按照片发送，改为文件发送：%s", item.path)
                 return self._send_document(item.path)
@@ -192,6 +202,8 @@ class TelegramClient:
                     files,
                 )
             return self._message_ids(result)
+        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+            raise
         except TelegramError:
             LOGGER.warning("图片相册发送失败，改为逐个文件发送")
             message_ids: list[int] = []
@@ -208,6 +220,8 @@ class TelegramClient:
                     {"animation": handle},
                 )
             return self._message_ids(result)
+        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+            raise
         except TelegramError:
             LOGGER.warning("动图无法按动画发送，改为文件发送：%s", item.path)
             return self._send_document(item.path)
@@ -221,6 +235,8 @@ class TelegramClient:
                     {"video": handle},
                 )
             return self._message_ids(result)
+        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+            raise
         except TelegramError:
             LOGGER.warning("视频无法按流媒体发送，改为文件发送：%s", item.path)
             return self._send_document(item.path)
@@ -258,8 +274,10 @@ class TelegramClient:
                 request_timeout,
                 max(5, int(data.get("timeout", 0)) + 5),
             )
+        is_delivery = method.startswith("send")
+        attempts = 3
         last_error = ""
-        for attempt in range(1, 4):
+        for attempt in range(1, attempts + 1):
             if files:
                 for value in files.values():
                     if hasattr(value, "seek"):
@@ -274,18 +292,34 @@ class TelegramClient:
                 try:
                     payload = response.json()
                 except ValueError as exc:
-                    raise TelegramError(f"Telegram {method} 返回了非 JSON 内容") from exc
+                    error = TelegramError(f"Telegram {method} 返回了非 JSON 内容")
+                    if is_delivery:
+                        raise TelegramDeliveryUnconfirmed(str(error)) from exc
+                    raise error from exc
+                if not isinstance(payload, dict):
+                    error = TelegramError(f"Telegram {method} 返回结构异常")
+                    if is_delivery:
+                        raise TelegramDeliveryUnconfirmed(str(error))
+                    raise error
                 if response.status_code < 400 and payload.get("ok") is True:
                     return payload.get("result")
                 description = payload.get("description") or response.text[:200]
                 last_error = f"Telegram {method} HTTP {response.status_code}: {description}"
+                if is_delivery and response.status_code in {500, 502, 503, 504}:
+                    raise TelegramDeliveryUnconfirmed(last_error)
+                if response.status_code == 429 and is_delivery and attempt == attempts:
+                    raise TelegramDeliveryRetryable(last_error)
                 if response.status_code not in {429, 500, 502, 503, 504}:
                     break
                 retry_after = payload.get("parameters", {}).get("retry_after", attempt)
-                time.sleep(min(int(retry_after), 10))
+                if attempt < attempts:
+                    time.sleep(min(int(retry_after), 10))
             except requests.RequestException as exc:
-                last_error = f"Telegram {method} 网络错误：{exc}"
-                if attempt < 3:
+                detail = str(exc).replace(self.config.bot_token, "[已隐藏]")
+                last_error = f"Telegram {method} 网络错误：{detail}"
+                if is_delivery:
+                    raise TelegramDeliveryUnconfirmed(last_error) from exc
+                if attempt < attempts:
                     time.sleep(attempt)
         raise TelegramError(last_error or f"Telegram {method} 请求失败")
 

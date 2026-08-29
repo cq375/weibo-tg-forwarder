@@ -152,7 +152,10 @@ class WeiboClient:
     def update_cookie(self, cookie: str) -> None:
         if not cookie.strip():
             raise WeiboFetchError("新的微博 Cookie 为空")
+        previous = self.authenticated
         self.authenticated = _new_session(cookie.strip())
+        if previous is not None:
+            previous.close()
         self._preferred_authenticated_source = "Cookie 桌面端"
         self._long_text_cache.clear()
 
@@ -163,6 +166,23 @@ class WeiboClient:
         if not mblogs:
             raise WeiboFetchError(f"新 Cookie 无法获取 UID {uid} 的首页微博")
         return len(mblogs)
+
+    def validate_cookie_candidate(self, cookie: str, uids: tuple[str, ...]) -> dict[str, int]:
+        """Validate a new Cookie without mutating the active authenticated session."""
+        value = cookie.strip()
+        if not value:
+            raise WeiboFetchError("新的微博 Cookie 为空")
+        candidate = _new_session(value)
+        try:
+            counts: dict[str, int] = {}
+            for uid in uids:
+                mblogs = self._fetch_desktop(candidate, uid, 1)
+                if not mblogs:
+                    raise WeiboFetchError(f"新 Cookie 无法获取 UID {uid} 的首页微博")
+                counts[uid] = len(mblogs)
+            return counts
+        finally:
+            candidate.close()
 
     def _fetch_mobile(
         self, session: requests.Session, uid: str, page: int

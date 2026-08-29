@@ -56,6 +56,7 @@ class WeiboQrRefresher:
                     qr = page.locator('img[src*="v2.qr.weibo.cn"]').first
                     qr.wait_for(state="visible", timeout=60_000)
                     self._save_qr(context, qr)
+                    os.chmod(self.qr_path, 0o600)
                     on_qr_ready(self.qr_path)
                     cookie = self._wait_for_login(context, page)
                     return cookie
@@ -111,8 +112,17 @@ class WeiboQrRefresher:
     def persist(self, cookie: str) -> None:
         self.cookie_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.cookie_file.with_name(f"{self.cookie_file.name}.tmp")
-        temporary.write_text(cookie.strip(), encoding="utf-8")
-        os.chmod(temporary, 0o600)
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = -1
+                handle.write(cookie.strip())
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         temporary.replace(self.cookie_file)
         os.chmod(self.cookie_file, 0o600)
         LOGGER.info("新的微博登录态已写入持久化 Cookie 文件")

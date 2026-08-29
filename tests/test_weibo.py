@@ -196,3 +196,30 @@ def test_remembers_successful_cookie_desktop_source(monkeypatch):
     weibo.fetch_page("1000000001", 1)
 
     assert calls == {"mobile": 1, "desktop": 2}
+
+
+def test_candidate_cookie_validation_does_not_replace_active_session(monkeypatch):
+    config = WeiboConfig(
+        uids=("1000000001", "1000000002"),
+        cookie="SUB=active",
+        poll_interval_seconds=120,
+        poll_jitter_seconds=60,
+        anonymous_retry_seconds=86400,
+        max_pages=5,
+        request_timeout_seconds=10,
+    )
+    weibo = WeiboClient(config)
+    active_session = weibo.authenticated
+    calls = []
+
+    def desktop(session, uid, page):
+        calls.append((session, uid, page))
+        return [{"idstr": f"post-{uid}"}]
+
+    monkeypatch.setattr(weibo, "_fetch_desktop", desktop)
+
+    counts = weibo.validate_cookie_candidate("SUB=candidate", config.uids)
+
+    assert counts == {"1000000001": 1, "1000000002": 1}
+    assert weibo.authenticated is active_session
+    assert all(session is not active_session for session, _uid, _page in calls)

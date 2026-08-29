@@ -14,7 +14,7 @@ from .cookie_refresh import WeiboQrRefresher
 from .media import MediaDownloader
 from .models import WeiboPost
 from .state import StateStore
-from .telegram import TelegramClient
+from .telegram import TelegramClient, TelegramDeliveryUnconfirmed
 from .weibo import WeiboClient
 
 LOGGER = logging.getLogger(__name__)
@@ -76,6 +76,13 @@ class ForwardService:
                 try:
                     self._process_post(post)
                     sent += 1
+                except TelegramDeliveryUnconfirmed as exc:
+                    failed += 1
+                    self.state.mark_delivery_unconfirmed(post.post_id, str(exc))
+                    LOGGER.exception(
+                        "微博 %s 的 Telegram 发送结果未知，已停止自动重试以避免重复转发",
+                        post.post_id,
+                    )
                 except Exception as exc:
                     failed += 1
                     self.state.mark_failed(post.post_id, str(exc))
@@ -128,14 +135,12 @@ class ForwardService:
         if not self.config.service.cookie_refresh_enabled or self.cookie_refresher is None:
             return False
 
-        if not self._refresh_lock.acquire(blocking=False):
-            LOGGER.info("已有微博 Cookie 扫码续期正在进行，跳过本轮自动续期")
-            return True
-
         with self._command_state_lock:
             if self._manual_refresh_pending:
-                self._refresh_lock.release()
                 LOGGER.info("管理员扫码续期请求已排队，跳过本轮自动续期")
+                return True
+            if not self._refresh_lock.acquire(blocking=False):
+                LOGGER.info("已有微博 Cookie 扫码续期正在进行，跳过本轮自动续期")
                 return True
             self._refresh_active.set()
         try:
@@ -182,10 +187,9 @@ class ForwardService:
                     self._refresh_qr_caption(trigger),
                 )
             )
-            self.weibo.update_cookie(cookie)
-            for uid in self.config.weibo.uids:
-                self.weibo.validate_cookie(uid)
+            self.weibo.validate_cookie_candidate(cookie, self.config.weibo.uids)
             self.cookie_refresher.persist(cookie)
+            self.weibo.update_cookie(cookie)
             self.state.reset_health(FETCH_HEALTH_KEY)
             self.state.reset_health(COOKIE_REFRESH_KEY)
             LOGGER.info("微博 Cookie 扫码续期成功（%s）", trigger)
@@ -279,7 +283,11 @@ class ForwardService:
             r"\1=[已隐藏]",
             value,
         )
-        value = re.sub(r"(?i)(bot\d{6,}:[A-Za-z0-9_-]+)", "bot[已隐藏]", value)
+        value = re.sub(
+            r"(?i)\b(?:bot)?\d{6,}:[A-Za-z0-9_-]{20,}\b",
+            "bot[已隐藏]",
+            value,
+        )
         return value[:2000]
 
     def _alert_due(self, health) -> bool:
@@ -514,18 +522,19 @@ class ForwardService:
                     self._manual_refresh_pending = False
                 self._send_private(chat_id, "微博 Cookie 扫码续期功能当前未启用。")
                 continue
-            if not self._refresh_lock.acquire(blocking=False):
-                with self._command_state_lock:
-                    self._manual_refresh_pending = False
+
+            with self._command_state_lock:
+                self._manual_refresh_pending = False
+                acquired = self._refresh_lock.acquire(blocking=False)
+                if acquired:
+                    self._refresh_active.set()
+            if not acquired:
                 self._send_private(
                     chat_id,
                     "微博 Cookie 扫码续期正在进行，请等待当前二维码流程结束。",
                 )
                 continue
 
-            with self._command_state_lock:
-                self._refresh_active.set()
-                self._manual_refresh_pending = False
             try:
                 self._perform_cookie_refresh(
                     trigger="手动",

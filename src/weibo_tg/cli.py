@@ -164,11 +164,11 @@ def _refresh_cookie(config, args: argparse.Namespace) -> int:
         )
     )
     weibo = WeiboClient(config.weibo)
-    weibo.update_cookie(cookie)
-    for uid in config.weibo.uids:
-        count = weibo.validate_cookie(uid)
+    counts = weibo.validate_cookie_candidate(cookie, config.weibo.uids)
+    for uid, count in counts.items():
         print(f"微博 UID {uid}：新 Cookie 验证正常，获取 {count} 条")
     refresher.persist(cookie)
+    weibo.update_cookie(cookie)
     telegram.send_alert("微博 Cookie 手动扫码续期成功，重启监控容器后生效。")
     print(f"新的 Cookie 已保存到 {config.storage.cookie_file}")
     return 0

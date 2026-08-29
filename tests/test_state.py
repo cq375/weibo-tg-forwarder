@@ -50,3 +50,21 @@ def test_health_state_is_persistent(tmp_path):
         assert health["alert_active"] == 1
         state.reset_health("weibo_fetch")
         assert state.get_health_state("weibo_fetch")["consecutive_failures"] == 0
+
+
+def test_mark_health_alerted_creates_missing_state(tmp_path):
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        state.mark_health_alerted("new-health-key")
+
+        health = state.get_health_state("new-health-key")
+        assert health["alert_active"] == 1
+        assert health["last_alert_at"] is not None
+
+
+def test_delivery_unconfirmed_is_not_a_retryable_status(tmp_path):
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        item = post()
+        state.mark_processing(item)
+        state.mark_delivery_unconfirmed(item.post_id, "timeout")
+
+        assert state.status(item.post_id) == "delivery_unconfirmed"

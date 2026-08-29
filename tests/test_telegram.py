@@ -1,10 +1,16 @@
 from datetime import datetime
 
 import pytest
+import requests
 
 from weibo_tg.config import TelegramConfig
 from weibo_tg.models import RepostContent, WeiboPost
-from weibo_tg.telegram import TelegramClient, TelegramError
+from weibo_tg.telegram import (
+    TelegramClient,
+    TelegramDeliveryRetryable,
+    TelegramDeliveryUnconfirmed,
+    TelegramError,
+)
 
 
 def test_formats_repost_message():
@@ -147,3 +153,96 @@ def test_get_updates_passes_offset_and_allowed_updates(monkeypatch):
             None,
         )
     ]
+
+
+def test_network_errors_do_not_expose_bot_token(monkeypatch):
+    token = "123456789:abcdefghijklmnopqrstuvwxyzABCDE"
+    client = TelegramClient(
+        TelegramConfig(token, "@channel", "https://api.telegram.org", 30)
+    )
+    monkeypatch.setattr("weibo_tg.telegram.time.sleep", lambda _seconds: None)
+
+    def fail(*_args, **_kwargs):
+        raise requests.ConnectionError(
+            f"connection failed for https://api.telegram.org/bot{token}/sendMessage"
+        )
+
+    monkeypatch.setattr(client.session, "post", fail)
+
+    calls = 0
+
+    def counted_fail(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return fail(*args, **kwargs)
+
+    monkeypatch.setattr(client.session, "post", counted_fail)
+
+    with pytest.raises(TelegramDeliveryUnconfirmed) as caught:
+        client.send_message("123", "test")
+    assert calls == 1
+    assert token not in str(caught.value)
+    assert "[已隐藏]" in str(caught.value)
+
+
+def test_unconfirmed_photo_delivery_is_not_retried_as_document(tmp_path, monkeypatch):
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"image")
+    calls = []
+
+    def call(method, _data=None, _files=None):
+        calls.append(method)
+        raise TelegramDeliveryUnconfirmed("sendPhoto timeout")
+
+    monkeypatch.setattr(client, "_call", call)
+
+    from weibo_tg.models import DownloadedMedia
+
+    with pytest.raises(TelegramDeliveryUnconfirmed):
+        client._send_images([DownloadedMedia("image", path, 0, "https://example/image")])
+    assert calls == ["sendPhoto"]
+
+
+def test_rate_limited_photo_is_not_retried_as_document(tmp_path, monkeypatch):
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"image")
+    calls = []
+
+    def call(method, _data=None, _files=None):
+        calls.append(method)
+        raise TelegramDeliveryRetryable("sendPhoto rate limited")
+
+    monkeypatch.setattr(client, "_call", call)
+
+    from weibo_tg.models import DownloadedMedia
+
+    with pytest.raises(TelegramDeliveryRetryable):
+        client._send_images([DownloadedMedia("image", path, 0, "https://example/image")])
+    assert calls == ["sendPhoto"]
+
+
+def test_non_object_delivery_response_is_unconfirmed(tmp_path, monkeypatch):
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"image")
+
+    class Response:
+        status_code = 200
+        text = "[]"
+
+        @staticmethod
+        def json():
+            return []
+
+    monkeypatch.setattr(client.session, "post", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(TelegramDeliveryUnconfirmed):
+        client.send_message("123", "test")

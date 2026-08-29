@@ -1,3 +1,5 @@
+import threading
+
 from weibo_tg.config import (
     AppConfig,
     ServiceConfig,
@@ -8,6 +10,7 @@ from weibo_tg.config import (
 from weibo_tg.models import WeiboPost
 from weibo_tg.service import ForwardService
 from weibo_tg.state import StateStore
+from weibo_tg.telegram import TelegramDeliveryUnconfirmed
 
 
 def make_post(post_id: str) -> WeiboPost:
@@ -87,11 +90,11 @@ class RefreshableWeibo(FailingWeibo):
     def __init__(self):
         self.cookie = ""
 
+    def validate_cookie_candidate(self, _cookie, uids):
+        return {uid: 20 for uid in uids}
+
     def update_cookie(self, cookie):
         self.cookie = cookie
-
-    def validate_cookie(self, _uid):
-        return 20
 
 
 class FakeRefresher:
@@ -327,3 +330,135 @@ def test_startup_discards_stale_telegram_updates(tmp_path):
 
         assert service._discard_pending_updates() == 12
         assert batches == []
+
+
+def test_failed_candidate_validation_keeps_active_cookie_and_does_not_persist(tmp_path):
+    base = make_config(tmp_path)
+    config = AppConfig(
+        weibo=base.weibo,
+        telegram=TelegramConfig(
+            "token", "channel", "https://api.telegram.org", 30, "123"
+        ),
+        storage=base.storage,
+        service=base.service,
+    )
+    telegram = FakeTelegram()
+    refresher = FakeRefresher(tmp_path / "qr.png")
+
+    class RejectingWeibo(RefreshableWeibo):
+        def __init__(self):
+            self.cookie = "SUB=still-active"
+
+        def validate_cookie_candidate(self, _cookie, _uids):
+            raise RuntimeError("candidate rejected")
+
+    weibo = RejectingWeibo()
+    with StateStore(config.storage.database) as state:
+        service = ForwardService(
+            config, weibo, FakeDownloader(), telegram, state, refresher
+        )
+        service._queue_manual_refresh("123")
+        service._process_manual_refresh_requests()
+
+    assert weibo.cookie == "SUB=still-active"
+    assert refresher.persisted == ""
+    assert any("手动扫码续期失败" in text for _chat, text in telegram.private)
+
+
+def test_first_manual_refresh_attempt_records_automatic_cooldown(tmp_path):
+    base = make_config(tmp_path)
+    config = AppConfig(
+        weibo=base.weibo,
+        telegram=TelegramConfig(
+            "token", "channel", "https://api.telegram.org", 30, "123"
+        ),
+        storage=base.storage,
+        service=base.service,
+    )
+    with StateStore(config.storage.database) as state:
+        service = ForwardService(
+            config,
+            RefreshableWeibo(),
+            FakeDownloader(),
+            FakeTelegram(),
+            state,
+            FakeRefresher(tmp_path / "qr.png"),
+        )
+        service._queue_manual_refresh("123")
+        service._process_manual_refresh_requests()
+
+        refresh_health = state.get_health_state("cookie_refresh")
+        assert refresh_health["last_alert_at"] is not None
+
+
+def test_command_arriving_while_request_is_claimed_does_not_queue_second_refresh(tmp_path):
+    base = make_config(tmp_path)
+    config = AppConfig(
+        weibo=base.weibo,
+        telegram=TelegramConfig(
+            "token", "channel", "https://api.telegram.org", 30, "123"
+        ),
+        storage=base.storage,
+        service=base.service,
+    )
+    telegram = FakeTelegram()
+    refresher = FakeRefresher(tmp_path / "qr.png")
+
+    with StateStore(config.storage.database) as state:
+        service = ForwardService(
+            config, RefreshableWeibo(), FakeDownloader(), telegram, state, refresher
+        )
+        second_command_done = threading.Event()
+        command_threads = []
+
+        class HookLock:
+            def acquire(self, blocking=False):
+                assert blocking is False
+                thread = threading.Thread(
+                    target=lambda: (
+                        service._queue_manual_refresh("123"),
+                        second_command_done.set(),
+                    )
+                )
+                command_threads.append(thread)
+                thread.start()
+                return True
+
+            def release(self):
+                return None
+
+        original_refresh = refresher.refresh
+
+        def wait_for_second_command(on_qr_ready):
+            assert second_command_done.wait(2)
+            return original_refresh(on_qr_ready)
+
+        refresher.refresh = wait_for_second_command
+        service._refresh_lock = HookLock()
+        service._queue_manual_refresh("123")
+        service._process_manual_refresh_requests()
+        for thread in command_threads:
+            thread.join(timeout=2)
+
+        assert refresher.refresh_count == 1
+        assert service._refresh_requests.empty()
+        assert sum("正在进行" in text for _chat, text in telegram.private) == 1
+
+
+def test_unconfirmed_telegram_delivery_is_not_retried_next_round(tmp_path):
+    config = make_config(tmp_path)
+    item = make_post("500000000000099")
+    weibo = FakeWeibo([item])
+
+    class UnconfirmedTelegram(FakeTelegram):
+        def send_post(self, _post, _media):
+            raise TelegramDeliveryUnconfirmed("sendMessage timeout")
+
+    telegram = UnconfirmedTelegram()
+    with StateStore(config.storage.database) as state:
+        state.mark_seeded([make_post("500000000000001")])
+        service = ForwardService(config, weibo, FakeDownloader(), telegram, state)
+
+        assert service.run_once() == (0, 1)
+        assert state.status(item.post_id) == "delivery_unconfirmed"
+        assert service.run_once() == (0, 0)

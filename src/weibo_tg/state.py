@@ -120,6 +120,18 @@ class StateStore:
         )
         self.connection.commit()
 
+    def mark_delivery_unconfirmed(self, post_id: str, error: str) -> None:
+        now = self._now()
+        self.connection.execute(
+            """
+            UPDATE posts
+            SET status = 'delivery_unconfirmed', error = ?, updated_at = ?
+            WHERE post_id = ?
+            """,
+            (error[:2000], now, post_id),
+        )
+        self.connection.commit()
+
     def record_health_failure(self, key: str, error: str) -> sqlite3.Row:
         now = self._now()
         self.connection.execute(
@@ -163,11 +175,15 @@ class StateStore:
         now = self._now()
         self.connection.execute(
             """
-            UPDATE health_state
-            SET alert_active = 1, last_alert_at = ?, updated_at = ?
-            WHERE key = ?
+            INSERT INTO health_state (
+                key, consecutive_failures, alert_active, last_alert_at, updated_at
+            ) VALUES (?, 0, 1, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                alert_active = 1,
+                last_alert_at = excluded.last_alert_at,
+                updated_at = excluded.updated_at
             """,
-            (now, now, key),
+            (key, now, now),
         )
         self.connection.commit()
 
