@@ -2,6 +2,8 @@
 
 监控配置中的微博账号。发现新微博后下载原图、普通视频和 Live Photo 的静态原图及动态 `.mov/.mp4` 文件，再转发到指定 Telegram 频道。
 
+同一个项目还提供独立的 `douyin-tg` 服务，可监控指定抖音账号，转发普通视频、图集静态图和 Live 图的动态视频。两个服务共用一个 Telegram Bot 和频道，但分别使用独立进程、SQLite 和媒体目录。
+
 抓取顺序为匿名移动端、匿名桌面端、Cookie 移动端、Cookie 桌面端。匿名接口被风控后会进入 10 分钟冷却期，其间直接使用 Cookie；未配置 Cookie 时会输出明确错误。
 
 ## Mac 本地测试
@@ -11,7 +13,7 @@ git clone https://github.com/cq375/weibo-tg-forwarder.git
 cd weibo-tg-forwarder
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev,douyin]'
 cp .env.example .env
 cp config.example.yml config.yml
 ```
@@ -161,3 +163,65 @@ sudo systemctl enable --now docker
 ```bash
 pytest
 ```
+
+## 抖音监控
+
+在 `config.yml` 的 `douyin.targets` 中配置抖音号和对应的 `sec_uid`：
+
+```yaml
+douyin:
+  targets:
+    - uid: "LL2003.1221"
+      sec_uid: "MS4wLjABAAAA..."
+  poll_interval_seconds: 120
+  poll_jitter_seconds: 60
+  max_pages: 2
+  request_timeout_seconds: 25
+```
+
+抖音默认使用匿名签名请求，不需要登录 Cookie。配置 `DOUYIN_COOKIE` 或 `data/douyin_cookie.txt` 后会优先使用登录态，因为未登录访客和已登录用户看到的作品集合可能不同；登录态请求失败时自动退回匿名接口。抖音 Cookie 与微博 Cookie 不通用。配置了登录态后，`doctor` 会逐个账号对比两种身份首页的作品差异，并列出“登录独有”和“匿名独有”的作品。可以先解析抖音号：
+
+```bash
+douyin-tg resolve LL2003.1221
+douyin-tg --config config.yml doctor
+```
+
+只抓取和解析，不下载媒体：
+
+```bash
+douyin-tg --config config.yml preview --no-download --limit 1
+```
+
+下载真实媒体但不发送 Telegram：
+
+```bash
+douyin-tg --config config.yml preview --uid LL2003.1221 --limit 1
+```
+
+普通视频、图集静态图和 Live 图动态视频都会保存到 `data/douyin-media`。Live 图会先发送静态图相册，再发送对应的动态视频。Telegram Bot API 普通上传上限约为 50MB；超过上限的原文件保留在服务器，并在频道发送说明和原文链接。
+
+首次启动只记录当前已有作品，不转发历史内容。之后每 `120 ± 60` 秒轮询一次，即每 `1-3` 分钟检查，按发布时间升序转发新作品。状态保存在独立的 `data/douyin-state.sqlite3`，以作品 `aweme_id` 去重，因此不会和微博数据库混用。
+
+本地完整测试发送（会真实发布到频道）：
+
+```bash
+douyin-tg --config config.yml test-send --id LL2003.1221 --keep-media
+```
+
+服务器首次建立抖音基线，再启动独立容器：
+
+```bash
+cd /root/weibo-tg
+docker compose run --rm douyin-tg \
+  douyin-tg --config /app/config.yml doctor
+docker compose run --rm douyin-tg \
+  douyin-tg --config /app/config.yml preview --no-download --limit 1
+docker compose run --rm douyin-tg \
+  douyin-tg --config /app/config.yml run --once
+docker compose up -d douyin-tg
+docker compose logs -f --tail=100 douyin-tg
+```
+
+不要用不带服务名的 `docker compose up -d --force-recreate`，否则会同时重建微博容器。抖音服务不会调用 Telegram `getUpdates`，因此不会抢微博的 `/refresh_cookie` 命令。
+
+每个抖音账号独立记录抓取健康状态。连续 `3` 轮失败才会向配置的 Telegram 通知频道告警，单个账号失效不会让整个服务退出。

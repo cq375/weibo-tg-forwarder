@@ -34,6 +34,22 @@ class WeiboPost:
     repost: RepostContent | None = None
 
 
+@dataclass
+class DouyinPost:
+    post_id: str
+    uid: str
+    sec_uid: str
+    author: str
+    text: str
+    created_at: datetime | None
+    created_at_raw: str
+    url: str
+    media: list[MediaItem] = field(default_factory=list)
+
+
+Post = WeiboPost | DouyinPost
+
+
 @dataclass(frozen=True)
 class DownloadedMedia:
     kind: str

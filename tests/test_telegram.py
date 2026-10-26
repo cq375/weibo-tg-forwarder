@@ -246,3 +246,105 @@ def test_non_object_delivery_response_is_unconfirmed(tmp_path, monkeypatch):
 
     with pytest.raises(TelegramDeliveryUnconfirmed):
         client.send_message("123", "test")
+
+
+def test_douyin_live_album_groups_stills_before_motion(tmp_path, monkeypatch):
+    from weibo_tg.models import DownloadedMedia, DouyinPost
+
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    post = DouyinPost(
+        post_id="200",
+        uid="account",
+        sec_uid="sec",
+        author="作者",
+        text="Live 图集",
+        created_at=None,
+        created_at_raw="",
+        url="https://www.douyin.com/video/200",
+    )
+    media = [
+        DownloadedMedia("image", tmp_path / "01.jpg", 0, "https://example/1"),
+        DownloadedMedia(
+            "live_photo_video", tmp_path / "01-live.mp4", 1, "https://example/1v"
+        ),
+        DownloadedMedia("image", tmp_path / "02.jpg", 2, "https://example/2"),
+        DownloadedMedia(
+            "live_photo_video", tmp_path / "02-live.mp4", 3, "https://example/2v"
+        ),
+    ]
+    for item in media:
+        item.path.write_bytes(b"x")
+    calls = []
+
+    monkeypatch.setattr(client, "_call", lambda *_args, **_kwargs: {"message_id": 1})
+    monkeypatch.setattr(
+        client,
+        "_send_images",
+        lambda items: calls.append(("images", [item.order for item in items])) or [2],
+    )
+    monkeypatch.setattr(
+        client,
+        "_send_video",
+        lambda item, caption=None: calls.append(
+            ("video", item.order, caption)
+        )
+        or [3],
+    )
+
+    assert client.send_post(post, media) == [1, 2, 3, 3]
+    assert calls == [
+        ("images", [0, 2]),
+        ("video", 1, "Live 动态图"),
+        ("video", 3, "Live 动态图"),
+    ]
+
+
+def test_weibo_live_media_keeps_original_still_then_motion_order(
+    tmp_path, monkeypatch
+):
+    from weibo_tg.models import DownloadedMedia, WeiboPost
+
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    post = WeiboPost(
+        post_id="500",
+        uid="account",
+        author="作者",
+        text="微博 Live",
+        created_at=None,
+        created_at_raw="",
+        url="https://weibo.com/account/500",
+    )
+    media = [
+        DownloadedMedia("image", tmp_path / "still.jpg", 0, "https://example/s"),
+        DownloadedMedia(
+            "live_photo_video", tmp_path / "live.mov", 1, "https://example/m"
+        ),
+        DownloadedMedia("image", tmp_path / "normal.jpg", 2, "https://example/n"),
+    ]
+    for item in media:
+        item.path.write_bytes(b"x")
+    calls = []
+
+    monkeypatch.setattr(client, "_call", lambda *_args, **_kwargs: {"message_id": 1})
+    monkeypatch.setattr(
+        client,
+        "_send_images",
+        lambda items: calls.append(("images", [item.order for item in items])) or [2],
+    )
+    monkeypatch.setattr(
+        client,
+        "_send_video",
+        lambda item, caption=None: calls.append(("video", item.order, caption))
+        or [3],
+    )
+
+    assert client.send_post(post, media) == [1, 2, 3, 2]
+    assert calls == [
+        ("images", [0]),
+        ("video", 1, "Live 动态图"),
+        ("images", [2]),
+    ]

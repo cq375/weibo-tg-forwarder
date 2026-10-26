@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import WeiboPost
+from .models import Post
 
 
 class StateStore:
@@ -69,7 +69,7 @@ class StateStore:
         ).fetchone()
         return str(row["status"]) if row else None
 
-    def mark_seeded(self, posts: list[WeiboPost]) -> None:
+    def mark_seeded(self, posts: list[Post]) -> None:
         now = self._now()
         self.connection.executemany(
             """
@@ -81,7 +81,7 @@ class StateStore:
         )
         self.connection.commit()
 
-    def mark_processing(self, post: WeiboPost) -> None:
+    def mark_processing(self, post: Post) -> None:
         now = self._now()
         self.connection.execute(
             """

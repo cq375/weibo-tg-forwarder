@@ -41,3 +41,80 @@ service: {}
     config = load_config(config_file)
 
     assert config.weibo.cookie == "SUB=persisted"
+
+
+def test_douyin_section_defaults_and_paths(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        """
+douyin:
+  targets:
+    - uid: "abc"
+      sec_uid: "MS4wLjABAAAAtarget"
+telegram: {}
+storage: {}
+service: {}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOUYIN_COOKIE", "ttwid=backup")
+
+    config = load_config(config_file)
+
+    assert config.weibo is None
+    assert config.douyin is not None
+    assert config.douyin.targets == (("abc", "MS4wLjABAAAAtarget"),)
+    assert config.douyin.cookie == "ttwid=backup"
+    assert config.douyin.poll_interval_seconds == 120
+    assert config.storage.douyin_database == (
+        tmp_path / "data/douyin-state.sqlite3"
+    ).resolve()
+
+
+def test_douyin_cookie_file_has_priority(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "douyin_cookie.txt").write_text("ttwid=persisted", encoding="utf-8")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        """
+douyin:
+  targets:
+    - uid: "abc"
+      sec_uid: "MS4wLjABAAAAtarget"
+telegram: {}
+storage: {}
+service: {}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOUYIN_COOKIE", "ttwid=environment")
+
+    config = load_config(config_file)
+
+    assert config.douyin is not None
+    assert config.douyin.cookie == "ttwid=persisted"
+
+
+def test_weibo_command_rejects_douyin_only_config(tmp_path):
+    from weibo_tg.cli import _require_weibo
+    from weibo_tg.config import ConfigError
+    import pytest
+
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        """
+douyin:
+  targets:
+    - uid: "abc"
+      sec_uid: "MS4wLjABAAAAtarget"
+telegram: {}
+storage: {}
+service: {}
+""",
+        encoding="utf-8",
+    )
+    config = load_config(config_file)
+
+    with pytest.raises(ConfigError, match="weibo.targets"):
+        _require_weibo(config)

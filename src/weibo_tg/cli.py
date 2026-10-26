@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .config import ConfigError, load_config
+from .config import ConfigError, WeiboConfig, load_config
 from .cookie_refresh import WeiboQrRefresher
 from .media import MediaDownloader
 from .service import ForwardService
@@ -52,6 +52,7 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _downloader(config):
+    _require_weibo(config)
     return MediaDownloader(
         config.storage.media_directory,
         config.storage.max_download_bytes,
@@ -59,11 +60,18 @@ def _downloader(config):
     )
 
 
+def _require_weibo(config) -> WeiboConfig:
+    if config.weibo is None:
+        raise ConfigError("配置中没有 weibo.targets，微博监控未启用")
+    return config.weibo
+
+
 def _preview(config, args: argparse.Namespace) -> int:
-    client = WeiboClient(config.weibo)
+    weibo_config = _require_weibo(config)
+    client = WeiboClient(weibo_config)
     downloader = _downloader(config)
-    requested = tuple(args.uid or config.weibo.uids)
-    unknown = set(requested) - set(config.weibo.uids)
+    requested = tuple(args.uid or weibo_config.uids)
+    unknown = set(requested) - set(weibo_config.uids)
     if unknown:
         raise ConfigError(f"UID 未在配置中：{', '.join(sorted(unknown))}")
 
@@ -85,6 +93,7 @@ def _preview(config, args: argparse.Namespace) -> int:
 
 
 def _doctor(config) -> int:
+    weibo_config = _require_weibo(config)
     print(f"监控账号：{', '.join(config.weibo.uids)}")
     print(f"微博 Cookie：{'已配置（匿名失败时启用）' if config.weibo.cookie else '未配置（仅匿名）'}")
     client = WeiboClient(config.weibo)
@@ -124,6 +133,7 @@ def _doctor(config) -> int:
 
 
 def _test_send(config, args: argparse.Namespace) -> int:
+    weibo_config = _require_weibo(config)
     if args.uid not in config.weibo.uids:
         raise ConfigError(f"UID 未在配置中：{args.uid}")
     config.require_telegram()
@@ -152,6 +162,7 @@ def _cookie_refresher(config, timeout: int | None = None) -> WeiboQrRefresher:
 
 
 def _refresh_cookie(config, args: argparse.Namespace) -> int:
+    weibo_config = _require_weibo(config)
     config.require_telegram()
     telegram = TelegramClient(config.telegram)
     refresher = _cookie_refresher(config, args.timeout)
@@ -164,7 +175,7 @@ def _refresh_cookie(config, args: argparse.Namespace) -> int:
         )
     )
     weibo = WeiboClient(config.weibo)
-    counts = weibo.validate_cookie_candidate(cookie, config.weibo.uids)
+    counts = weibo.validate_cookie_candidate(cookie, weibo_config.uids)
     for uid, count in counts.items():
         print(f"微博 UID {uid}：新 Cookie 验证正常，获取 {count} 条")
     refresher.persist(cookie)
@@ -198,6 +209,14 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(config_path.parent / ".env")
     try:
         config = load_config(config_path)
+        if args.command in {
+            "preview",
+            "doctor",
+            "test-send",
+            "refresh-cookie",
+            "run",
+        }:
+            _require_weibo(config)
         if args.command == "preview":
             return _preview(config, args)
         if args.command == "doctor":

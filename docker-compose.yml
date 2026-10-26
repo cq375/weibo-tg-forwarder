@@ -16,3 +16,19 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  douyin-tg:
+    build: .
+    restart: unless-stopped
+    shm_size: "512mb"
+    env_file:
+      - .env
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ./data:/app/data
+    command: ["douyin-tg", "--config", "/app/config.yml", "run"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

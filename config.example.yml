@@ -8,6 +8,15 @@ weibo:
   max_pages: 5
   request_timeout_seconds: 25
 
+douyin:
+  targets:
+    - uid: "123456789"
+      sec_uid: "MS4wLjABAAAA..."
+  poll_interval_seconds: 120
+  poll_jitter_seconds: 60
+  max_pages: 2
+  request_timeout_seconds: 25
+
 telegram:
   api_base: "https://api.telegram.org"
   request_timeout_seconds: 90
@@ -17,6 +26,9 @@ storage:
   database: "./data/state.sqlite3"
   media_directory: "./data/media"
   cookie_file: "./data/weibo_cookie.txt"
+  douyin_database: "./data/douyin-state.sqlite3"
+  douyin_media_directory: "./data/douyin-media"
+  douyin_cookie_file: "./data/douyin_cookie.txt"
   keep_media_after_send: false
   max_download_megabytes: 2000
 

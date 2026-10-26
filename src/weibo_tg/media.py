@@ -10,7 +10,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .models import DownloadedMedia, MediaItem, WeiboPost
+from .models import DownloadedMedia, MediaItem, Post
 from .weibo import USER_AGENT
 
 LOGGER = logging.getLogger(__name__)
@@ -38,15 +38,16 @@ class MediaDownloader:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         self.session.headers.update({"User-Agent": USER_AGENT, "Accept": "*/*"})
+        self.referers: dict[str, str] = {}
 
-    def download_post(self, post: WeiboPost) -> list[DownloadedMedia]:
+    def download_post(self, post: Post) -> list[DownloadedMedia]:
         post_dir = self.root / post.uid / post.post_id
         post_dir.mkdir(parents=True, exist_ok=True)
         downloaded = [self._download_item(post, item, post_dir) for item in post.media]
         return sorted(downloaded, key=lambda item: item.order)
 
     def _download_item(
-        self, post: WeiboPost, item: MediaItem, post_dir: Path
+        self, post: Post, item: MediaItem, post_dir: Path
     ) -> DownloadedMedia:
         prefix = f"{item.order + 1:02d}-{self._safe_name(item.filename_hint)}"
         existing = next(
@@ -67,7 +68,7 @@ class MediaDownloader:
 
     def _download_url(
         self,
-        post: WeiboPost,
+        post: Post,
         item: MediaItem,
         prefix: str,
         post_dir: Path,
@@ -75,7 +76,7 @@ class MediaDownloader:
     ) -> DownloadedMedia:
         with self.session.get(
             url,
-            headers={"Referer": post.url},
+            headers={"Referer": self.referers.get(url, post.url)},
             stream=True,
             allow_redirects=True,
             timeout=self.timeout_seconds,
@@ -147,7 +148,11 @@ class MediaDownloader:
             "live_photo_video": "mov",
         }.get(kind, "bin")
 
-    def cleanup_post(self, post: WeiboPost) -> None:
+    def cleanup_post(self, post: Post) -> None:
         post_dir = self.root / post.uid / post.post_id
         if post_dir.exists():
             shutil.rmtree(post_dir)
+
+    def set_referer(self, url: str, referer: str) -> None:
+        """Attach a per-resource referer without changing the public Post model."""
+        self.referers[url] = referer

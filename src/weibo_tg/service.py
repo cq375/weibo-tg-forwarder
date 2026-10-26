@@ -32,6 +32,8 @@ class ForwardService:
         state: StateStore,
         cookie_refresher: WeiboQrRefresher | None = None,
     ):
+        if config.weibo is None:
+            raise ValueError("微博监控配置未启用")
         self.config = config
         self.weibo = weibo
         self.downloader = downloader
@@ -51,6 +53,7 @@ class ForwardService:
         sent = 0
         failed = 0
         fetch_failures: dict[str, str] = {}
+        assert self.config.weibo is not None
         for uid in self.config.weibo.uids:
             try:
                 posts = self._collect_posts(uid)
@@ -187,6 +190,7 @@ class ForwardService:
                     self._refresh_qr_caption(trigger),
                 )
             )
+            assert self.config.weibo is not None
             self.weibo.validate_cookie_candidate(cookie, self.config.weibo.uids)
             self.cookie_refresher.persist(cookie)
             self.weibo.update_cookie(cookie)
@@ -205,7 +209,7 @@ class ForwardService:
 
         success_text = (
             f"微博 Cookie {trigger}续期成功\n\n"
-            f"已验证账号：{', '.join(self.config.weibo.uids)}\n"
+            f"已验证账号：{', '.join(self.config.weibo.uids)}\n"  # type: ignore[union-attr]
             f"完成时间：{self._china_time()}\n"
             "监控已立即使用新登录态，无需重启容器。"
         )
@@ -309,7 +313,7 @@ class ForwardService:
         seen_ids: set[str] = set()
         initialized = self.state.has_any(uid)
 
-        for page in range(1, self.config.weibo.max_pages + 1):
+        for page in range(1, self.config.weibo.max_pages + 1):  # type: ignore[union-attr]
             page_posts = self.weibo.fetch_page(uid, page)
             if not page_posts:
                 break
@@ -329,7 +333,7 @@ class ForwardService:
                 LOGGER.warning(
                     "UID %s 连续 %s 页均未遇到已知微博，停机期间可能发布过更多内容",
                     uid,
-                    self.config.weibo.max_pages,
+                    self.config.weibo.max_pages,  # type: ignore[union-attr]
                 )
         return posts
 
@@ -357,7 +361,7 @@ class ForwardService:
 
     def run_forever(self) -> None:
         self._install_signal_handlers()
-        LOGGER.info("开始监控 %s", ", ".join(self.config.weibo.uids))
+        LOGGER.info("开始监控 %s", ", ".join(self.config.weibo.uids))  # type: ignore[union-attr]
         self._start_telegram_listener()
         try:
             while not self.stop_event.is_set():
@@ -374,8 +378,8 @@ class ForwardService:
                 if self.stop_event.is_set():
                     break
 
-                base = self.config.weibo.poll_interval_seconds
-                jitter = self.config.weibo.poll_jitter_seconds
+                base = self.config.weibo.poll_interval_seconds  # type: ignore[union-attr]
+                jitter = self.config.weibo.poll_jitter_seconds  # type: ignore[union-attr]
                 wait_seconds = max(15, base + random.randint(-jitter, jitter) if jitter else base)
                 self._command_event.wait(wait_seconds)
         finally:

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from .config import TelegramConfig
-from .models import DownloadedMedia, WeiboPost
+from .models import DownloadedMedia, DouyinPost, Post, WeiboPost
 
 LOGGER = logging.getLogger(__name__)
 
@@ -137,11 +137,9 @@ class TelegramClient:
                 raise TelegramError("TELEGRAM_ALERT_CHAT_ID 必须是管理员与 Bot 的私聊 ID")
         return self.config.alert_chat_id
 
-    def send_post(
-        self, post: WeiboPost, media: list[DownloadedMedia]
-    ) -> list[int]:
+    def send_post(self, post: Post, media: list[DownloadedMedia]) -> list[int]:
         message_ids: list[int] = []
-        for chunk in self._split_text(self._format_post(post)):
+        for chunk in self._split_text(self.format_post(post)):
             result = self._call(
                 "sendMessage",
                 {
@@ -152,19 +150,77 @@ class TelegramClient:
             )
             message_ids.extend(self._message_ids(result))
 
+        if isinstance(post, DouyinPost):
+            message_ids.extend(self._send_douyin_media(media))
+        else:
+            message_ids.extend(self._send_weibo_media(media))
+        return message_ids
+
+    def _send_weibo_media(self, media: list[DownloadedMedia]) -> list[int]:
+        message_ids: list[int] = []
         index = 0
         while index < len(media):
             item = media[index]
             if item.kind == "image":
                 group: list[DownloadedMedia] = []
-                while index < len(media) and media[index].kind == "image" and len(group) < 10:
+                while (
+                    index < len(media)
+                    and media[index].kind == "image"
+                    and len(group) < 10
+                ):
                     group.append(media[index])
                     index += 1
                 message_ids.extend(self._send_images(group))
                 continue
             if item.kind == "animation":
                 message_ids.extend(self._send_animation(item))
-            elif item.kind in {"video", "live_photo_video"}:
+            elif item.kind == "live_photo_video":
+                message_ids.extend(
+                    self._send_video(item, caption="Live 动态图")
+                )
+            elif item.kind == "video":
+                message_ids.extend(self._send_video(item))
+            else:
+                message_ids.extend(self._send_document(item.path))
+            index += 1
+        return message_ids
+
+    def _send_douyin_media(self, media: list[DownloadedMedia]) -> list[int]:
+        message_ids: list[int] = []
+        index = 0
+        while index < len(media):
+            item = media[index]
+            if item.kind == "image":
+                group: list[DownloadedMedia] = []
+                live_videos: list[DownloadedMedia] = []
+                while index < len(media) and len(group) < 10:
+                    candidate = media[index]
+                    if candidate.kind == "image":
+                        group.append(candidate)
+                        index += 1
+                        continue
+                    if (
+                        candidate.kind == "live_photo_video"
+                        and group
+                        and candidate.order == group[-1].order + 1
+                    ):
+                        live_videos.append(candidate)
+                        index += 1
+                        continue
+                    break
+                message_ids.extend(self._send_images(group))
+                for video in live_videos:
+                    message_ids.extend(
+                        self._send_video(video, caption="Live 动态图")
+                    )
+                continue
+            if item.kind == "animation":
+                message_ids.extend(self._send_animation(item))
+            elif item.kind == "live_photo_video":
+                message_ids.extend(
+                    self._send_video(item, caption="Live 动态图")
+                )
+            elif item.kind == "video":
                 message_ids.extend(self._send_video(item))
             else:
                 message_ids.extend(self._send_document(item.path))
@@ -226,14 +282,18 @@ class TelegramClient:
             LOGGER.warning("动图无法按动画发送，改为文件发送：%s", item.path)
             return self._send_document(item.path)
 
-    def _send_video(self, item: DownloadedMedia) -> list[int]:
+    def _send_video(
+        self, item: DownloadedMedia, caption: str | None = None
+    ) -> list[int]:
+        data = {
+            "chat_id": self.config.channel_id,
+            "supports_streaming": "true",
+        }
+        if caption:
+            data["caption"] = caption
         try:
             with item.path.open("rb") as handle:
-                result = self._call(
-                    "sendVideo",
-                    {"chat_id": self.config.channel_id, "supports_streaming": "true"},
-                    {"video": handle},
-                )
+                result = self._call("sendVideo", data, {"video": handle})
             return self._message_ids(result)
         except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
             raise
@@ -333,7 +393,13 @@ class TelegramClient:
         ]
 
     @staticmethod
-    def _format_post(post: WeiboPost) -> str:
+    def format_post(post: Post) -> str:
+        if isinstance(post, DouyinPost):
+            return TelegramClient._format_douyin_post(post)
+        return TelegramClient._format_weibo_post(post)
+
+    @staticmethod
+    def _format_weibo_post(post: WeiboPost) -> str:
         lines = [f"微博更新：@{post.author}"]
         timestamp = TelegramClient._format_time(post.created_at, post.created_at_raw)
         if timestamp:
@@ -343,6 +409,20 @@ class TelegramClient:
             lines.extend(["", f"转发自：@{post.repost.author}", post.repost.text])
         lines.extend(["", f"原文：{post.url}"])
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _format_douyin_post(post: DouyinPost) -> str:
+        lines = [f"抖音更新：@{post.author}"]
+        timestamp = TelegramClient._format_time(post.created_at, post.created_at_raw)
+        if timestamp:
+            lines.append(f"时间：{timestamp}")
+        lines.extend(["", post.text or "（无文字内容）", "", f"原文：{post.url}"])
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _format_post(post: WeiboPost) -> str:
+        """Backward-compatible helper for existing callers and tests."""
+        return TelegramClient._format_weibo_post(post)
 
     @staticmethod
     def _format_time(value: datetime | None, raw: str) -> str:

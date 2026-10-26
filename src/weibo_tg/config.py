@@ -24,6 +24,16 @@ class WeiboConfig:
 
 
 @dataclass(frozen=True)
+class DouyinConfig:
+    targets: tuple[tuple[str, str], ...]
+    cookie: str
+    poll_interval_seconds: int
+    poll_jitter_seconds: int
+    max_pages: int
+    request_timeout_seconds: int
+
+
+@dataclass(frozen=True)
 class TelegramConfig:
     bot_token: str
     channel_id: str
@@ -40,6 +50,9 @@ class StorageConfig:
     keep_media_after_send: bool
     max_download_bytes: int
     cookie_file: Path | None = None
+    douyin_database: Path | None = None
+    douyin_media_directory: Path | None = None
+    douyin_cookie_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -54,10 +67,11 @@ class ServiceConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
-    weibo: WeiboConfig
+    weibo: WeiboConfig | None
     telegram: TelegramConfig
     storage: StorageConfig
     service: ServiceConfig
+    douyin: DouyinConfig | None = None
 
     def require_telegram(self) -> None:
         missing = []
@@ -104,10 +118,28 @@ def load_config(path: str | Path) -> AppConfig:
         for item in targets
         if isinstance(item, dict) and str(item.get("uid", "")).strip()
     )
-    if not uids:
-        raise ConfigError("至少需要配置一个微博 UID")
     if any(not uid.isdigit() for uid in uids):
         raise ConfigError("微博 UID 只能包含数字")
+
+    douyin = _section(raw, "douyin")
+    douyin_targets_raw = douyin.get("targets", [])
+    if not isinstance(douyin_targets_raw, list):
+        raise ConfigError("douyin.targets 必须是列表")
+    douyin_targets: list[tuple[str, str]] = []
+    for item in douyin_targets_raw:
+        if not isinstance(item, dict):
+            continue
+        uid = str(item.get("uid", "")).strip()
+        sec_uid = str(item.get("sec_uid", "")).strip()
+        if not uid and not sec_uid:
+            continue
+        if not uid:
+            raise ConfigError("douyin.targets 中每个账号都必须配置 uid")
+        if not sec_uid:
+            raise ConfigError(f"抖音账号 {uid} 缺少 sec_uid")
+        douyin_targets.append((uid, sec_uid))
+    if not uids and not douyin_targets:
+        raise ConfigError("至少需要配置一个微博 UID 或抖音账号")
 
     bootstrap_mode = str(service.get("bootstrap_mode", "seed"))
     if bootstrap_mode not in {"seed", "forward_latest"}:
@@ -127,16 +159,61 @@ def load_config(path: str | Path) -> AppConfig:
     persisted_cookie = ""
     if cookie_file.exists():
         persisted_cookie = cookie_file.read_text(encoding="utf-8").strip()
+    douyin_database_path = _resolve_path(
+        base, str(storage.get("douyin_database", "./data/douyin-state.sqlite3"))
+    )
+    douyin_media_directory = _resolve_path(
+        base, str(storage.get("douyin_media_directory", "./data/douyin-media"))
+    )
+    douyin_cookie_file = _resolve_path(
+        base, str(storage.get("douyin_cookie_file", "./data/douyin_cookie.txt"))
+    )
+    environment_douyin_cookie = os.getenv(
+        "DOUYIN_COOKIE", str(douyin.get("cookie", ""))
+    ).strip()
+    persisted_douyin_cookie = ""
+    if douyin_cookie_file.exists():
+        persisted_douyin_cookie = douyin_cookie_file.read_text(encoding="utf-8").strip()
 
     return AppConfig(
-        weibo=WeiboConfig(
-            uids=uids,
-            cookie=persisted_cookie or environment_cookie,
-            poll_interval_seconds=max(15, int(weibo.get("poll_interval_seconds", 120))),
-            poll_jitter_seconds=max(0, int(weibo.get("poll_jitter_seconds", 60))),
-            anonymous_retry_seconds=max(60, int(weibo.get("anonymous_retry_seconds", 86400))),
-            max_pages=max(1, int(weibo.get("max_pages", 5))),
-            request_timeout_seconds=max(5, int(weibo.get("request_timeout_seconds", 25))),
+        weibo=(
+            WeiboConfig(
+                uids=uids,
+                cookie=persisted_cookie or environment_cookie,
+                poll_interval_seconds=max(
+                    15, int(weibo.get("poll_interval_seconds", 120))
+                ),
+                poll_jitter_seconds=max(
+                    0, int(weibo.get("poll_jitter_seconds", 60))
+                ),
+                anonymous_retry_seconds=max(
+                    60, int(weibo.get("anonymous_retry_seconds", 86400))
+                ),
+                max_pages=max(1, int(weibo.get("max_pages", 5))),
+                request_timeout_seconds=max(
+                    5, int(weibo.get("request_timeout_seconds", 25))
+                ),
+            )
+            if uids
+            else None
+        ),
+        douyin=(
+            DouyinConfig(
+                targets=tuple(douyin_targets),
+                cookie=persisted_douyin_cookie or environment_douyin_cookie,
+                poll_interval_seconds=max(
+                    30, int(douyin.get("poll_interval_seconds", 120))
+                ),
+                poll_jitter_seconds=max(
+                    0, int(douyin.get("poll_jitter_seconds", 60))
+                ),
+                max_pages=max(1, int(douyin.get("max_pages", 2))),
+                request_timeout_seconds=max(
+                    5, int(douyin.get("request_timeout_seconds", 25))
+                ),
+            )
+            if douyin_targets
+            else None
         ),
         telegram=TelegramConfig(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", str(telegram.get("bot_token", ""))).strip(),
@@ -154,6 +231,9 @@ def load_config(path: str | Path) -> AppConfig:
             keep_media_after_send=bool(storage.get("keep_media_after_send", False)),
             max_download_bytes=max_megabytes * 1024 * 1024,
             cookie_file=cookie_file,
+            douyin_database=douyin_database_path,
+            douyin_media_directory=douyin_media_directory,
+            douyin_cookie_file=douyin_cookie_file,
         ),
         service=ServiceConfig(
             bootstrap_mode=bootstrap_mode,

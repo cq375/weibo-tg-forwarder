@@ -36,6 +36,7 @@ def make_config(tmp_path) -> AppConfig:
             max_pages=2,
             request_timeout_seconds=10,
         ),
+        douyin=None,
         telegram=TelegramConfig("token", "channel", "https://api.telegram.org", 30),
         storage=StorageConfig(tmp_path / "state.sqlite3", tmp_path / "media", False, 1024),
         service=ServiceConfig("seed"),
@@ -184,6 +185,7 @@ def test_manual_refresh_requires_admin_private_chat_and_updates_running_client(t
     base = make_config(tmp_path)
     config = AppConfig(
         weibo=base.weibo,
+        douyin=None,
         telegram=TelegramConfig(
             "token", "channel", "https://api.telegram.org", 30, "123", True
         ),
@@ -224,6 +226,7 @@ def test_manual_refresh_bypasses_automatic_cooldown(tmp_path):
     base = make_config(tmp_path)
     config = AppConfig(
         weibo=base.weibo,
+        douyin=None,
         telegram=TelegramConfig(
             "token", "channel", "https://api.telegram.org", 30, "123"
         ),
@@ -255,6 +258,7 @@ def test_duplicate_manual_refresh_is_rejected_while_pending(tmp_path):
     base = make_config(tmp_path)
     config = AppConfig(
         weibo=base.weibo,
+        douyin=None,
         telegram=TelegramConfig(
             "token", "channel", "https://api.telegram.org", 30, "123"
         ),
@@ -283,6 +287,7 @@ def test_pending_manual_refresh_takes_priority_over_automatic_refresh(tmp_path):
     base = make_config(tmp_path)
     config = AppConfig(
         weibo=base.weibo,
+        douyin=None,
         telegram=TelegramConfig(
             "token", "channel", "https://api.telegram.org", 30, "123"
         ),
@@ -336,6 +341,7 @@ def test_failed_candidate_validation_keeps_active_cookie_and_does_not_persist(tm
     base = make_config(tmp_path)
     config = AppConfig(
         weibo=base.weibo,
+        douyin=None,
         telegram=TelegramConfig(
             "token", "channel", "https://api.telegram.org", 30, "123"
         ),
@@ -369,6 +375,7 @@ def test_first_manual_refresh_attempt_records_automatic_cooldown(tmp_path):
     base = make_config(tmp_path)
     config = AppConfig(
         weibo=base.weibo,
+        douyin=None,
         telegram=TelegramConfig(
             "token", "channel", "https://api.telegram.org", 30, "123"
         ),
@@ -395,6 +402,7 @@ def test_command_arriving_while_request_is_claimed_does_not_queue_second_refresh
     base = make_config(tmp_path)
     config = AppConfig(
         weibo=base.weibo,
+        douyin=None,
         telegram=TelegramConfig(
             "token", "channel", "https://api.telegram.org", 30, "123"
         ),

@@ -17,9 +17,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
+douyin = [
+  "f2 @ git+https://github.com/Johnserf-Seed/f2.git@f6be8c0ffba9a127075bbeafe4838716650b6325",
+  "cryptography==48.0.1",
+]
 
 [project.scripts]
 weibo-tg = "weibo_tg.cli:main"
+douyin-tg = "weibo_tg.douyin_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
