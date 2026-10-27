@@ -169,7 +169,13 @@ class DouyinForwardService:
         health = self.state.record_health_failure(key, str(exc))
         count = int(health["consecutive_failures"])
         threshold = self.config.service.alert_after_consecutive_failures
-        if count < threshold or not self._alert_due(health):
+        repeat_threshold = max(threshold, 50)
+        if count < threshold or (
+            bool(health["alert_active"])
+            and count < repeat_threshold
+            or bool(health["alert_active"])
+            and count % repeat_threshold != 0
+        ):
             return
         try:
             self.telegram.send_alert(
@@ -177,7 +183,7 @@ class DouyinForwardService:
                 f"账号 {uid} 连续 {count} 轮抓取失败。\n"
                 f"错误：{str(exc)[:500]}\n\n"
                 f"告警时间：{self._china_time()}\n"
-                "请登录服务器运行 douyin-tg doctor 检查。"
+                "请先确认服务器网络、容器和出口 IP 正常，再运行 douyin-tg doctor 检查。"
             )
             self.state.mark_health_alerted(key)
             LOGGER.warning("已发送抖音抓取异常告警：%s，连续失败 %s 轮", uid, count)
@@ -208,16 +214,6 @@ class DouyinForwardService:
     def _reset_health(self, key: str) -> None:
         self.state.get_health_state(key)
         self.state.reset_health(key)
-
-    def _alert_due(self, health) -> bool:
-        if not bool(health["alert_active"]):
-            return True
-        last_alert_raw = health["last_alert_at"]
-        if not last_alert_raw:
-            return True
-        last_alert = datetime.fromisoformat(str(last_alert_raw))
-        elapsed = (datetime.now(timezone.utc) - last_alert).total_seconds()
-        return elapsed >= self.config.service.alert_repeat_seconds
 
     @staticmethod
     def _post_sort_key(post: DouyinPost) -> tuple[int, str]:

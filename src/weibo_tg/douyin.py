@@ -417,7 +417,10 @@ class DouyinClient:
             if identity == "primary":
                 self._last_auth_mode = "cookie"
             return payload
-        raise DouyinFetchError("抖音匿名接口处于冷却期，且登录 Cookie 不可用")
+        raise DouyinFetchError(
+            "抖音匿名接口处于冷却期，且登录 Cookie 未成功；"
+            "请先检查服务器网络、出口 IP 和 Cookie 状态"
+        )
 
     def _request_signed(
         self, base_endpoint: str, params: dict[str, Any], *, cookie: str

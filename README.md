@@ -224,4 +224,4 @@ docker compose logs -f --tail=100 douyin-tg
 
 不要用不带服务名的 `docker compose up -d --force-recreate`，否则会同时重建微博容器。抖音服务不会调用 Telegram `getUpdates`，因此不会抢微博的 `/refresh_cookie` 命令。
 
-每个抖音账号独立记录抓取健康状态。连续 `3` 轮失败才会向配置的 Telegram 通知频道告警，单个账号失效不会让整个服务退出。
+每个抖音账号独立记录抓取健康状态。连续 `3` 轮失败后向配置的 Telegram 通知频道发出首个告警，持续失败时只在第 `50`、`100`、`150` 等轮次再次提醒，避免服务器断网时刷屏。单个账号失效不会让整个服务退出。

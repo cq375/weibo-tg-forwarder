@@ -135,6 +135,27 @@ def test_three_failures_alert_once(tmp_path):
         assert "连续 3 轮" in telegram.alerts[0]
 
 
+def test_persistent_failure_only_alerts_at_long_intervals(tmp_path):
+    config = make_config(tmp_path)
+    telegram = FakeTelegram()
+    with StateStore(tmp_path / "douyin.sqlite3") as state:
+        service = DouyinForwardService(
+            config, FailingDouyin([]), FakeDownloader(), telegram, state
+        )
+        for _ in range(49):
+            service.run_once()
+        assert len(telegram.alerts) == 1
+
+        service.run_once()
+        assert len(telegram.alerts) == 2
+        assert "连续 50 轮" in telegram.alerts[1]
+        assert "服务器网络" in telegram.alerts[1]
+
+        for _ in range(49):
+            service.run_once()
+        assert len(telegram.alerts) == 2
+
+
 def test_reports_cookie_fallback_when_login_is_configured(tmp_path):
     config = replace_douyin_config(
         make_config(tmp_path),
