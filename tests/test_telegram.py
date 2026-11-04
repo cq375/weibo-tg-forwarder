@@ -290,10 +290,10 @@ def test_douyin_live_album_groups_stills_before_motion(tmp_path, monkeypatch):
     assert calls[1][0] == "sendMediaGroup"
     media_payload = json.loads(calls[1][1]["media"])
     assert len(media_payload) == 2
-    assert media_payload[0]["type"] == "live_photo"
-    assert media_payload[1]["type"] == "live_photo"
-    assert "pic0" in calls[1][2] and "vid0" in calls[1][2]
-    assert "pic1" in calls[1][2] and "vid1" in calls[1][2]
+    assert media_payload[0]["type"] == "video"
+    assert media_payload[1]["type"] == "video"
+    assert "thumb0" in calls[1][2] and "vid0" in calls[1][2]
+    assert "thumb1" in calls[1][2] and "vid1" in calls[1][2]
 
 
 def test_weibo_live_media_keeps_original_still_then_motion_order(
@@ -336,13 +336,13 @@ def test_weibo_live_media_keeps_original_still_then_motion_order(
     assert calls[1][0] == "sendMediaGroup"
     media_payload = json.loads(calls[1][1]["media"])
     assert len(media_payload) == 2
-    assert media_payload[0]["type"] == "live_photo"
+    assert media_payload[0]["type"] == "video"
     assert media_payload[1]["type"] == "photo"
-    assert "pic0" in calls[1][2] and "vid0" in calls[1][2]
+    assert "thumb0" in calls[1][2] and "vid0" in calls[1][2]
     assert "pic1" in calls[1][2]
 
 
-def test_single_live_photo_uses_send_live_photo(tmp_path, monkeypatch):
+def test_single_live_photo_uses_send_video(tmp_path, monkeypatch):
     from weibo_tg.models import DownloadedMedia, WeiboPost
 
     client = TelegramClient(
@@ -375,8 +375,8 @@ def test_single_live_photo_uses_send_live_photo(tmp_path, monkeypatch):
 
     assert client.send_post(post, media) == [1, 2]
     assert calls[0][0] == "sendMessage"
-    assert calls[1][0] == "sendLivePhoto"
-    assert "photo" in calls[1][2] and "live_photo" in calls[1][2]
+    assert calls[1][0] == "sendVideo"
+    assert "video" in calls[1][2] and "thumbnail" in calls[1][2]
 
 
 def test_live_album_fallback_when_live_group_rejected(tmp_path, monkeypatch):

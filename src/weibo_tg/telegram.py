@@ -240,7 +240,7 @@ class TelegramClient:
     def _send_visual_group(self, group: list[PairedMedia]) -> list[int]:
         if len(group) == 1:
             item = group[0]
-            if item.kind == "live_photo" and item.photo and item.video:
+            if item.kind == "live_photo" and item.video:
                 return self._send_single_live_photo(item.photo, item.video)
             if item.photo:
                 return self._send_images([item.photo])
@@ -249,27 +249,30 @@ class TelegramClient:
         try:
             with ExitStack() as stack:
                 files: dict[str, Any] = {}
-                media: list[dict[str, str]] = []
+                media: list[dict[str, Any]] = []
                 for index, item in enumerate(group):
-                    if not item.photo:
-                        continue
-                    pic_key = f"pic{index}"
-                    files[pic_key] = stack.enter_context(
-                        item.photo.path.open("rb")
-                    )
                     if item.kind == "live_photo" and item.video:
                         vid_key = f"vid{index}"
                         files[vid_key] = stack.enter_context(
                             item.video.path.open("rb")
                         )
-                        media.append(
-                            {
-                                "type": "live_photo",
-                                "photo": f"attach://{pic_key}",
-                                "media": f"attach://{vid_key}",
-                            }
+                        entry: dict[str, Any] = {
+                            "type": "video",
+                            "media": f"attach://{vid_key}",
+                            "supports_streaming": True,
+                        }
+                        if item.photo and item.photo.path.exists():
+                            thumb_key = f"thumb{index}"
+                            files[thumb_key] = stack.enter_context(
+                                item.photo.path.open("rb")
+                            )
+                            entry["thumbnail"] = f"attach://{thumb_key}"
+                        media.append(entry)
+                    elif item.photo:
+                        pic_key = f"pic{index}"
+                        files[pic_key] = stack.enter_context(
+                            item.photo.path.open("rb")
                         )
-                    else:
                         media.append(
                             {
                                 "type": "photo",
@@ -289,30 +292,14 @@ class TelegramClient:
             raise
         except TelegramError as exc:
             LOGGER.warning(
-                "原生实况相册发送失败，降级为普通相册加独立视频：%s", exc
+                "实况合并九宫格发送失败，降级为普通相册加独立视频：%s", exc
             )
             return self._fallback_send_visual_group(group)
 
     def _send_single_live_photo(
-        self, photo: DownloadedMedia, video: DownloadedMedia
+        self, photo: DownloadedMedia | None, video: DownloadedMedia
     ) -> list[int]:
-        try:
-            with photo.path.open("rb") as p_handle, video.path.open(
-                "rb"
-            ) as v_handle:
-                result = self._call(
-                    "sendLivePhoto",
-                    {"chat_id": self.config.channel_id},
-                    {"photo": p_handle, "live_photo": v_handle},
-                )
-            return self._message_ids(result)
-        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
-            raise
-        except TelegramError as exc:
-            LOGGER.warning("单张实况图发送失败，降级为图片加视频：%s", exc)
-            ids = self._send_images([photo])
-            ids.extend(self._send_video(video, caption="Live 动态图"))
-            return ids
+        return self._send_video(video, thumbnail=photo)
 
     def _fallback_send_visual_group(
         self, group: list[PairedMedia]
@@ -402,7 +389,10 @@ class TelegramClient:
             return self._send_document(item.path)
 
     def _send_video(
-        self, item: DownloadedMedia, caption: str | None = None
+        self,
+        item: DownloadedMedia,
+        caption: str | None = None,
+        thumbnail: DownloadedMedia | None = None,
     ) -> list[int]:
         data = {
             "chat_id": self.config.channel_id,
@@ -410,9 +400,15 @@ class TelegramClient:
         }
         if caption:
             data["caption"] = caption
+        files: dict[str, Any] = {}
         try:
-            with item.path.open("rb") as handle:
-                result = self._call("sendVideo", data, {"video": handle})
+            with ExitStack() as stack:
+                files["video"] = stack.enter_context(item.path.open("rb"))
+                if thumbnail and thumbnail.path.exists():
+                    files["thumbnail"] = stack.enter_context(
+                        thumbnail.path.open("rb")
+                    )
+                result = self._call("sendVideo", data, files)
             return self._message_ids(result)
         except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
             raise
