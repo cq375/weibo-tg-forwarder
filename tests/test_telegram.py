@@ -278,27 +278,22 @@ def test_douyin_live_album_groups_stills_before_motion(tmp_path, monkeypatch):
         item.path.write_bytes(b"x")
     calls = []
 
-    monkeypatch.setattr(client, "_call", lambda *_args, **_kwargs: {"message_id": 1})
-    monkeypatch.setattr(
-        client,
-        "_send_images",
-        lambda items: calls.append(("images", [item.order for item in items])) or [2],
-    )
-    monkeypatch.setattr(
-        client,
-        "_send_video",
-        lambda item, caption=None: calls.append(
-            ("video", item.order, caption)
-        )
-        or [3],
-    )
+    def call(method, data=None, files=None):
+        calls.append((method, data, files))
+        return {"message_id": len(calls)}
 
-    assert client.send_post(post, media) == [1, 2, 3, 3]
-    assert calls == [
-        ("images", [0, 2]),
-        ("video", 1, "Live 动态图"),
-        ("video", 3, "Live 动态图"),
-    ]
+    monkeypatch.setattr(client, "_call", call)
+
+    import json
+    assert client.send_post(post, media) == [1, 2]
+    assert calls[0][0] == "sendMessage"
+    assert calls[1][0] == "sendMediaGroup"
+    media_payload = json.loads(calls[1][1]["media"])
+    assert len(media_payload) == 2
+    assert media_payload[0]["type"] == "live_photo"
+    assert media_payload[1]["type"] == "live_photo"
+    assert "pic0" in calls[1][2] and "vid0" in calls[1][2]
+    assert "pic1" in calls[1][2] and "vid1" in calls[1][2]
 
 
 def test_weibo_live_media_keeps_original_still_then_motion_order(
@@ -329,22 +324,95 @@ def test_weibo_live_media_keeps_original_still_then_motion_order(
         item.path.write_bytes(b"x")
     calls = []
 
-    monkeypatch.setattr(client, "_call", lambda *_args, **_kwargs: {"message_id": 1})
-    monkeypatch.setattr(
-        client,
-        "_send_images",
-        lambda items: calls.append(("images", [item.order for item in items])) or [2],
-    )
-    monkeypatch.setattr(
-        client,
-        "_send_video",
-        lambda item, caption=None: calls.append(("video", item.order, caption))
-        or [3],
-    )
+    def call(method, data=None, files=None):
+        calls.append((method, data, files))
+        return {"message_id": len(calls)}
 
-    assert client.send_post(post, media) == [1, 2, 3, 2]
-    assert calls == [
-        ("images", [0]),
-        ("video", 1, "Live 动态图"),
-        ("images", [2]),
+    monkeypatch.setattr(client, "_call", call)
+
+    import json
+    assert client.send_post(post, media) == [1, 2]
+    assert calls[0][0] == "sendMessage"
+    assert calls[1][0] == "sendMediaGroup"
+    media_payload = json.loads(calls[1][1]["media"])
+    assert len(media_payload) == 2
+    assert media_payload[0]["type"] == "live_photo"
+    assert media_payload[1]["type"] == "photo"
+    assert "pic0" in calls[1][2] and "vid0" in calls[1][2]
+    assert "pic1" in calls[1][2]
+
+
+def test_single_live_photo_uses_send_live_photo(tmp_path, monkeypatch):
+    from weibo_tg.models import DownloadedMedia, WeiboPost
+
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    post = WeiboPost(
+        post_id="600",
+        uid="account",
+        author="作者",
+        text="单张 Live",
+        created_at=None,
+        created_at_raw="",
+        url="https://weibo.com/account/600",
+    )
+    media = [
+        DownloadedMedia("image", tmp_path / "still.jpg", 0, "https://example/s"),
+        DownloadedMedia(
+            "live_photo_video", tmp_path / "live.mov", 1, "https://example/m"
+        ),
     ]
+    for item in media:
+        item.path.write_bytes(b"x")
+    calls = []
+
+    def call(method, data=None, files=None):
+        calls.append((method, data, files))
+        return {"message_id": len(calls)}
+
+    monkeypatch.setattr(client, "_call", call)
+
+    assert client.send_post(post, media) == [1, 2]
+    assert calls[0][0] == "sendMessage"
+    assert calls[1][0] == "sendLivePhoto"
+    assert "photo" in calls[1][2] and "live_photo" in calls[1][2]
+
+
+def test_live_album_fallback_when_live_group_rejected(tmp_path, monkeypatch):
+    from weibo_tg.models import DownloadedMedia, WeiboPost
+
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    post = WeiboPost(
+        post_id="700",
+        uid="account",
+        author="作者",
+        text="实况降级",
+        created_at=None,
+        created_at_raw="",
+        url="https://weibo.com/account/700",
+    )
+    media = [
+        DownloadedMedia("image", tmp_path / "still.jpg", 0, "https://example/s"),
+        DownloadedMedia(
+            "live_photo_video", tmp_path / "live.mov", 1, "https://example/m"
+        ),
+        DownloadedMedia("image", tmp_path / "normal.jpg", 2, "https://example/n"),
+    ]
+    for item in media:
+        item.path.write_bytes(b"x")
+    calls = []
+
+    def call(method, data=None, files=None):
+        calls.append(method)
+        if method == "sendMediaGroup" and len(calls) == 2:
+            raise TelegramError("live photo not supported")
+        return {"message_id": len(calls)}
+
+    monkeypatch.setattr(client, "_call", call)
+
+    msg_ids = client.send_post(post, media)
+    assert calls == ["sendMessage", "sendMediaGroup", "sendMediaGroup", "sendVideo"]
+    assert msg_ids == [1, 3, 4]

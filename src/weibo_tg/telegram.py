@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
 import threading
@@ -28,6 +29,14 @@ class TelegramDeliveryUnconfirmed(TelegramError):
 
 class TelegramDeliveryRetryable(TelegramError):
     """Telegram explicitly rejected a write before delivery, so a later retry is safe."""
+
+
+@dataclass(frozen=True)
+class PairedMedia:
+    kind: str  # "image", "live_photo", "video", "animation", "other"
+    photo: DownloadedMedia | None = None
+    video: DownloadedMedia | None = None
+    raw: DownloadedMedia | None = None
 
 
 class TelegramClient:
@@ -156,76 +165,174 @@ class TelegramClient:
             message_ids.extend(self._send_weibo_media(media))
         return message_ids
 
-    def _send_weibo_media(self, media: list[DownloadedMedia]) -> list[int]:
-        message_ids: list[int] = []
+    @staticmethod
+    def _pair_media(media: list[DownloadedMedia]) -> list[PairedMedia]:
+        paired: list[PairedMedia] = []
         index = 0
         while index < len(media):
             item = media[index]
             if item.kind == "image":
-                group: list[DownloadedMedia] = []
-                while (
-                    index < len(media)
-                    and media[index].kind == "image"
-                    and len(group) < 10
+                if (
+                    index + 1 < len(media)
+                    and media[index + 1].kind == "live_photo_video"
+                    and media[index + 1].order == item.order + 1
                 ):
-                    group.append(media[index])
-                    index += 1
-                message_ids.extend(self._send_images(group))
+                    paired.append(
+                        PairedMedia(
+                            kind="live_photo",
+                            photo=item,
+                            video=media[index + 1],
+                        )
+                    )
+                    index += 2
+                    continue
+                paired.append(PairedMedia(kind="image", photo=item))
+                index += 1
+                continue
+            if item.kind == "live_photo_video":
+                paired.append(PairedMedia(kind="video", video=item))
+                index += 1
+                continue
+            if item.kind == "video":
+                paired.append(PairedMedia(kind="video", video=item))
+                index += 1
                 continue
             if item.kind == "animation":
-                message_ids.extend(self._send_animation(item))
-            elif item.kind == "live_photo_video":
-                message_ids.extend(
-                    self._send_video(item, caption="Live 动态图")
+                paired.append(PairedMedia(kind="animation", raw=item))
+                index += 1
+                continue
+            paired.append(PairedMedia(kind="other", raw=item))
+            index += 1
+        return paired
+
+    def _send_paired_media(self, paired: list[PairedMedia]) -> list[int]:
+        message_ids: list[int] = []
+        index = 0
+        while index < len(paired):
+            item = paired[index]
+            if item.kind in {"image", "live_photo"}:
+                group: list[PairedMedia] = []
+                while (
+                    index < len(paired)
+                    and paired[index].kind in {"image", "live_photo"}
+                    and len(group) < 10
+                ):
+                    group.append(paired[index])
+                    index += 1
+                message_ids.extend(self._send_visual_group(group))
+                continue
+            if item.kind == "animation" and item.raw:
+                message_ids.extend(self._send_animation(item.raw))
+            elif item.kind == "video" and item.video:
+                caption = (
+                    "Live 动态图"
+                    if item.video.kind == "live_photo_video"
+                    else None
                 )
-            elif item.kind == "video":
-                message_ids.extend(self._send_video(item))
-            else:
-                message_ids.extend(self._send_document(item.path))
+                message_ids.extend(
+                    self._send_video(item.video, caption=caption)
+                )
+            elif item.raw:
+                message_ids.extend(self._send_document(item.raw.path))
             index += 1
         return message_ids
 
-    def _send_douyin_media(self, media: list[DownloadedMedia]) -> list[int]:
-        message_ids: list[int] = []
-        index = 0
-        while index < len(media):
-            item = media[index]
-            if item.kind == "image":
-                group: list[DownloadedMedia] = []
-                live_videos: list[DownloadedMedia] = []
-                while index < len(media) and len(group) < 10:
-                    candidate = media[index]
-                    if candidate.kind == "image":
-                        group.append(candidate)
-                        index += 1
+    def _send_visual_group(self, group: list[PairedMedia]) -> list[int]:
+        if len(group) == 1:
+            item = group[0]
+            if item.kind == "live_photo" and item.photo and item.video:
+                return self._send_single_live_photo(item.photo, item.video)
+            if item.photo:
+                return self._send_images([item.photo])
+            return []
+
+        try:
+            with ExitStack() as stack:
+                files: dict[str, Any] = {}
+                media: list[dict[str, str]] = []
+                for index, item in enumerate(group):
+                    if not item.photo:
                         continue
-                    if (
-                        candidate.kind == "live_photo_video"
-                        and group
-                        and candidate.order == group[-1].order + 1
-                    ):
-                        live_videos.append(candidate)
-                        index += 1
-                        continue
-                    break
-                message_ids.extend(self._send_images(group))
-                for video in live_videos:
-                    message_ids.extend(
-                        self._send_video(video, caption="Live 动态图")
+                    pic_key = f"pic{index}"
+                    files[pic_key] = stack.enter_context(
+                        item.photo.path.open("rb")
                     )
-                continue
-            if item.kind == "animation":
-                message_ids.extend(self._send_animation(item))
-            elif item.kind == "live_photo_video":
-                message_ids.extend(
-                    self._send_video(item, caption="Live 动态图")
+                    if item.kind == "live_photo" and item.video:
+                        vid_key = f"vid{index}"
+                        files[vid_key] = stack.enter_context(
+                            item.video.path.open("rb")
+                        )
+                        media.append(
+                            {
+                                "type": "live_photo",
+                                "photo": f"attach://{pic_key}",
+                                "media": f"attach://{vid_key}",
+                            }
+                        )
+                    else:
+                        media.append(
+                            {
+                                "type": "photo",
+                                "media": f"attach://{pic_key}",
+                            }
+                        )
+                result = self._call(
+                    "sendMediaGroup",
+                    {
+                        "chat_id": self.config.channel_id,
+                        "media": json.dumps(media),
+                    },
+                    files,
                 )
-            elif item.kind == "video":
-                message_ids.extend(self._send_video(item))
-            else:
-                message_ids.extend(self._send_document(item.path))
-            index += 1
+            return self._message_ids(result)
+        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+            raise
+        except TelegramError as exc:
+            LOGGER.warning(
+                "原生实况相册发送失败，降级为普通相册加独立视频：%s", exc
+            )
+            return self._fallback_send_visual_group(group)
+
+    def _send_single_live_photo(
+        self, photo: DownloadedMedia, video: DownloadedMedia
+    ) -> list[int]:
+        try:
+            with photo.path.open("rb") as p_handle, video.path.open(
+                "rb"
+            ) as v_handle:
+                result = self._call(
+                    "sendLivePhoto",
+                    {"chat_id": self.config.channel_id},
+                    {"photo": p_handle, "live_photo": v_handle},
+                )
+            return self._message_ids(result)
+        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+            raise
+        except TelegramError as exc:
+            LOGGER.warning("单张实况图发送失败，降级为图片加视频：%s", exc)
+            ids = self._send_images([photo])
+            ids.extend(self._send_video(video, caption="Live 动态图"))
+            return ids
+
+    def _fallback_send_visual_group(
+        self, group: list[PairedMedia]
+    ) -> list[int]:
+        message_ids: list[int] = []
+        photos = [item.photo for item in group if item.photo]
+        if photos:
+            message_ids.extend(self._send_images(photos))
+        for item in group:
+            if item.kind == "live_photo" and item.video:
+                message_ids.extend(
+                    self._send_video(item.video, caption="Live 动态图")
+                )
         return message_ids
+
+    def _send_weibo_media(self, media: list[DownloadedMedia]) -> list[int]:
+        return self._send_paired_media(self._pair_media(media))
+
+    def _send_douyin_media(self, media: list[DownloadedMedia]) -> list[int]:
+        return self._send_paired_media(self._pair_media(media))
 
     def _send_images(self, items: list[DownloadedMedia]) -> list[int]:
         if len(items) == 1:
