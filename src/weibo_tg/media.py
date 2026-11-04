@@ -20,6 +20,9 @@ class MediaDownloadError(RuntimeError):
     pass
 
 
+TELEGRAM_MEDIA_MAX_BYTES = 10 * 1024 * 1024  # 10 MB limit enforced by Telegram Bot API
+
+
 class MediaDownloader:
     def __init__(self, root: Path, max_download_bytes: int, timeout_seconds: int):
         self.root = root
@@ -60,10 +63,20 @@ class MediaDownloader:
         failures: list[str] = []
         for url in item.urls:
             try:
-                return self._download_url(post, item, prefix, post_dir, url)
+                return self._download_url(
+                    post, item, prefix, post_dir, url, limit_photo_size=True
+                )
             except (requests.RequestException, MediaDownloadError) as exc:
                 failures.append(f"{url}: {exc}")
                 LOGGER.warning("媒体候选地址下载失败：%s", exc)
+
+        if item.urls:
+            try:
+                return self._download_url(
+                    post, item, prefix, post_dir, item.urls[0], limit_photo_size=False
+                )
+            except Exception:
+                pass
         raise MediaDownloadError("；".join(failures))
 
     def _download_url(
@@ -73,6 +86,7 @@ class MediaDownloader:
         prefix: str,
         post_dir: Path,
         url: str,
+        limit_photo_size: bool = False,
     ) -> DownloadedMedia:
         with self.session.get(
             url,
@@ -89,6 +103,14 @@ class MediaDownloader:
                 raise MediaDownloadError(f"返回了非媒体内容 {content_type}")
 
             announced = int(response.headers.get("Content-Length") or 0)
+            if (
+                limit_photo_size
+                and item.kind in {"image", "live_photo_video"}
+                and announced > TELEGRAM_MEDIA_MAX_BYTES
+            ):
+                raise MediaDownloadError(
+                    f"文件大小 {announced} 字节超过 Telegram 10MB 限制，尝试其他候选尺寸"
+                )
             if announced > self.max_download_bytes:
                 raise MediaDownloadError(
                     f"文件大小 {announced} 字节超过配置上限 {self.max_download_bytes} 字节"
@@ -104,6 +126,14 @@ class MediaDownloader:
                         if not chunk:
                             continue
                         written += len(chunk)
+                        if (
+                            limit_photo_size
+                            and item.kind in {"image", "live_photo_video"}
+                            and written > TELEGRAM_MEDIA_MAX_BYTES
+                        ):
+                            raise MediaDownloadError(
+                                f"下载大小超过 Telegram 10MB 限制，尝试其他候选尺寸"
+                            )
                         if written > self.max_download_bytes:
                             raise MediaDownloadError(
                                 f"下载超过配置上限 {self.max_download_bytes} 字节"
@@ -112,12 +142,39 @@ class MediaDownloader:
                 if written == 0:
                     raise MediaDownloadError("下载结果为空")
                 temporary_path.replace(final_path)
+                if (
+                    item.kind == "image"
+                    and final_path.stat().st_size > TELEGRAM_MEDIA_MAX_BYTES
+                ):
+                    self._compress_photo(final_path)
             except Exception:
                 temporary_path.unlink(missing_ok=True)
                 raise
 
         LOGGER.info("已下载媒体 %s（%.2f MB）", final_path, written / 1024 / 1024)
         return DownloadedMedia(item.kind, final_path, item.order, url)
+
+    @staticmethod
+    def _compress_photo(path: Path) -> None:
+        try:
+            from PIL import Image
+
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                for quality in (85, 75, 65):
+                    img.save(path, "JPEG", quality=quality, optimize=True)
+                    if path.stat().st_size <= TELEGRAM_MEDIA_MAX_BYTES:
+                        LOGGER.info("图片已压缩至 Telegram 10MB 以内：%s", path)
+                        return
+                width, height = img.size
+                img = img.resize(
+                    (int(width * 0.75), int(height * 0.75)),
+                    Image.Resampling.LANCZOS,
+                )
+                img.save(path, "JPEG", quality=75, optimize=True)
+                LOGGER.info("图片缩放并压缩至 Telegram 10MB 以内：%s", path)
+        except Exception as exc:
+            LOGGER.warning("图片后处理压缩跳过或失败：%s", exc)
 
     @staticmethod
     def _safe_name(value: str) -> str:

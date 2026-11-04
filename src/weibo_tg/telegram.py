@@ -367,11 +367,23 @@ class TelegramClient:
             return self._message_ids(result)
         except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
             raise
-        except TelegramError:
-            LOGGER.warning("图片相册发送失败，改为逐个文件发送")
+        except TelegramError as exc:
+            LOGGER.warning("图片相册发送失败，改为逐张图片发送：%s", exc)
             message_ids: list[int] = []
             for item in items:
-                message_ids.extend(self._send_document(item.path))
+                try:
+                    with item.path.open("rb") as handle:
+                        result = self._call(
+                            "sendPhoto",
+                            {"chat_id": self.config.channel_id},
+                            {"photo": handle},
+                        )
+                    message_ids.extend(self._message_ids(result))
+                except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+                    raise
+                except TelegramError:
+                    LOGGER.warning("单张图片发送失败，改为文件发送：%s", item.path)
+                    message_ids.extend(self._send_document(item.path))
             return message_ids
 
     def _send_animation(self, item: DownloadedMedia) -> list[int]:
