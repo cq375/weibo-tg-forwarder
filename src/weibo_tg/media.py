@@ -58,6 +58,8 @@ class MediaDownloader:
             None,
         )
         if existing and existing.stat().st_size > 0:
+            if item.kind == "image":
+                self._normalize_photo(existing)
             return DownloadedMedia(item.kind, existing, item.order, item.urls[0])
 
         failures: list[str] = []
@@ -142,11 +144,8 @@ class MediaDownloader:
                 if written == 0:
                     raise MediaDownloadError("下载结果为空")
                 temporary_path.replace(final_path)
-                if (
-                    item.kind == "image"
-                    and final_path.stat().st_size > TELEGRAM_MEDIA_MAX_BYTES
-                ):
-                    self._compress_photo(final_path)
+                if item.kind == "image":
+                    self._normalize_photo(final_path)
             except Exception:
                 temporary_path.unlink(missing_ok=True)
                 raise
@@ -155,26 +154,50 @@ class MediaDownloader:
         return DownloadedMedia(item.kind, final_path, item.order, url)
 
     @staticmethod
-    def _compress_photo(path: Path) -> None:
+    def _normalize_photo(path: Path) -> None:
+        """Ensure downloaded photo complies with Telegram's size and dimension limits.
+
+        Telegram Bot API rejects photos with PHOTO_INVALID_DIMENSIONS if
+        width + height > 10,000 pixels, and rejects photos > 10 MB.
+        """
         try:
             from PIL import Image
 
             with Image.open(path) as img:
+                width, height = img.size
+                file_size = path.stat().st_size
+                needs_resize = (width + height > 9500) or max(width, height) > 2560
+                needs_compress = file_size > TELEGRAM_MEDIA_MAX_BYTES
+
+                if not needs_resize and not needs_compress:
+                    return
+
                 img = img.convert("RGB")
+                if needs_resize:
+                    scale = 2560 / max(width, height)
+                    new_w = max(1, int(width * scale))
+                    new_h = max(1, int(height * scale))
+                    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                    LOGGER.info(
+                        "图片尺寸调整至 Telegram 上限以内（%dx%d -> %dx%d）：%s",
+                        width,
+                        height,
+                        new_w,
+                        new_h,
+                        path,
+                    )
+
                 for quality in (85, 75, 65):
                     img.save(path, "JPEG", quality=quality, optimize=True)
                     if path.stat().st_size <= TELEGRAM_MEDIA_MAX_BYTES:
-                        LOGGER.info("图片已压缩至 Telegram 10MB 以内：%s", path)
-                        return
-                width, height = img.size
-                img = img.resize(
-                    (int(width * 0.75), int(height * 0.75)),
-                    Image.Resampling.LANCZOS,
+                        break
+                LOGGER.info(
+                    "图片规范化完成（%.2f MB）：%s",
+                    path.stat().st_size / 1024 / 1024,
+                    path,
                 )
-                img.save(path, "JPEG", quality=75, optimize=True)
-                LOGGER.info("图片缩放并压缩至 Telegram 10MB 以内：%s", path)
         except Exception as exc:
-            LOGGER.warning("图片后处理压缩跳过或失败：%s", exc)
+            LOGGER.warning("图片规范化处理跳过或失败：%s", exc)
 
     @staticmethod
     def _safe_name(value: str) -> str:
