@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Callable
@@ -10,6 +11,8 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 LOGGER = logging.getLogger(__name__)
+
+MACOS_CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
 LOGIN_URL = (
     "https://passport.weibo.com/sso/signin"
@@ -33,13 +36,7 @@ class WeiboQrRefresher:
 
         try:
             with sync_playwright() as playwright:
-                executable = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "").strip()
-                launch_options = {
-                    "headless": True,
-                    "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-                }
-                if executable:
-                    launch_options["executable_path"] = executable
+                launch_options = self._launch_options()
                 browser = playwright.chromium.launch(**launch_options)
                 context = browser.new_context(
                     locale="zh-CN",
@@ -71,6 +68,44 @@ class WeiboQrRefresher:
             raise CookieRefreshError(f"微博扫码登录失败：{exc}") from exc
         finally:
             self.qr_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _chrome_executable() -> Path | None:
+        configured = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "").strip()
+        if configured:
+            path = Path(configured).expanduser()
+            if not path.is_file():
+                raise CookieRefreshError(
+                    f"PLAYWRIGHT_CHROMIUM_EXECUTABLE 指向的浏览器不存在：{path}"
+                )
+            return path
+        if sys.platform == "darwin" and MACOS_CHROME.is_file():
+            return MACOS_CHROME
+        return None
+
+    @classmethod
+    def _launch_options(cls) -> dict:
+        executable = cls._chrome_executable()
+        options = {
+            "headless": True,
+            "args": ["--disable-dev-shm-usage", "--disable-gpu"],
+        }
+        if executable is not None:
+            options["executable_path"] = str(executable)
+            options["chromium_sandbox"] = True
+            return options
+        if sys.platform == "darwin":
+            raise CookieRefreshError(
+                "本机未找到 Google Chrome，请安装 Chrome，"
+                "或用 PLAYWRIGHT_CHROMIUM_EXECUTABLE 指定浏览器路径"
+            )
+        # The official Playwright container runs as root by default, and
+        # Chromium refuses to start with its sandbox in that environment.
+        is_root = getattr(os, "geteuid", lambda: 1000)() == 0
+        options["chromium_sandbox"] = not is_root
+        if is_root:
+            options["args"].insert(0, "--no-sandbox")
+        return options
 
     def _save_qr(self, context, qr) -> None:
         qr_url = qr.get_attribute("src")
