@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import io
 import json
+import struct
 import logging
 import threading
 import time
@@ -38,6 +40,131 @@ class PairedMedia:
     video: DownloadedMedia | None = None
     raw: DownloadedMedia | None = None
 
+
+
+def get_video_metadata(path: Path) -> dict[str, int]:
+    w, h, duration = 0, 0, 0
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            f.seek(0)
+
+            moov_data = None
+            pos = 0
+            while pos < file_size:
+                f.seek(pos)
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                size, box_type = struct.unpack(">I4s", hdr)
+                if size == 1:
+                    hdr64 = f.read(8)
+                    if len(hdr64) < 8:
+                        break
+                    size = struct.unpack(">Q", hdr64)[0]
+                    hdr_len = 16
+                elif size == 0:
+                    size = file_size - pos
+                    hdr_len = 8
+                else:
+                    hdr_len = 8
+
+                if size < hdr_len:
+                    break
+
+                if box_type == b"moov":
+                    to_read = min(size - hdr_len, 10 * 1024 * 1024)
+                    moov_data = f.read(to_read)
+                    break
+                pos += size
+
+            if moov_data:
+                mvhd_idx = moov_data.find(b"mvhd")
+                if mvhd_idx != -1 and mvhd_idx + 4 < len(moov_data):
+                    version = moov_data[mvhd_idx + 4]
+                    if version == 0 and mvhd_idx + 24 <= len(moov_data):
+                        timescale, dur = struct.unpack(
+                            ">II", moov_data[mvhd_idx + 16 : mvhd_idx + 24]
+                        )
+                    elif version == 1 and mvhd_idx + 36 <= len(moov_data):
+                        timescale = struct.unpack(
+                            ">I", moov_data[mvhd_idx + 24 : mvhd_idx + 28]
+                        )[0]
+                        dur = struct.unpack(
+                            ">Q", moov_data[mvhd_idx + 28 : mvhd_idx + 36]
+                        )[0]
+                    else:
+                        timescale, dur = 0, 0
+                    if timescale > 0:
+                        duration = max(1, int(round(dur / timescale)))
+
+                pos = 0
+                while True:
+                    tkhd_idx = moov_data.find(b"tkhd", pos)
+                    if tkhd_idx == -1 or tkhd_idx + 4 >= len(moov_data):
+                        break
+                    version = moov_data[tkhd_idx + 4]
+                    if version == 0:
+                        matrix_offset = tkhd_idx + 4 + 44
+                        w_offset = tkhd_idx + 4 + 76
+                    else:
+                        matrix_offset = tkhd_idx + 4 + 56
+                        w_offset = tkhd_idx + 4 + 88
+
+                    if w_offset + 8 <= len(moov_data):
+                        tw, th = struct.unpack(">II", moov_data[w_offset : w_offset + 8])
+                        tw >>= 16
+                        th >>= 16
+                        if tw > 0 and th > 0:
+                            if matrix_offset + 20 <= len(moov_data):
+                                a, b, _, c, d = struct.unpack(
+                                    ">iiiii", moov_data[matrix_offset : matrix_offset + 20]
+                                )
+                                rotation = 0
+                                if b > 0 and c < 0:
+                                    rotation = 90
+                                elif a < 0 and d < 0:
+                                    rotation = 180
+                                elif b < 0 and c > 0:
+                                    rotation = 270
+                                if rotation in (90, 270):
+                                    tw, th = th, tw
+                            w, h = tw, th
+                            break
+                    pos = tkhd_idx + 4
+    except Exception:
+        pass
+    return {"width": w, "height": h, "duration": duration}
+
+
+def get_image_dimensions(path: Path) -> tuple[int, int]:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            return img.size
+    except Exception:
+        return 0, 0
+
+
+def create_telegram_thumbnail(path: Path, max_dimension: int = 320) -> bytes | None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            w, h = img.size
+            if max(w, h) > max_dimension:
+                scale = max_dimension / max(w, h)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80, optimize=True)
+            return buf.getvalue()
+    except Exception:
+        return None
 
 class TelegramClient:
     def __init__(self, config: TelegramConfig):
@@ -256,16 +383,36 @@ class TelegramClient:
                         files[vid_key] = stack.enter_context(
                             item.video.path.open("rb")
                         )
+                        meta = get_video_metadata(item.video.path)
+                        width = meta["width"]
+                        height = meta["height"]
+                        if (width <= 0 or height <= 0) and item.photo and item.photo.path.exists():
+                            pw, ph = get_image_dimensions(item.photo.path)
+                            if pw > 0 and ph > 0:
+                                width, height = pw, ph
+
                         entry: dict[str, Any] = {
                             "type": "video",
                             "media": f"attach://{vid_key}",
                             "supports_streaming": True,
                         }
+                        if width > 0:
+                            entry["width"] = width
+                        if height > 0:
+                            entry["height"] = height
+                        if meta["duration"] > 0:
+                            entry["duration"] = meta["duration"]
+
                         if item.photo and item.photo.path.exists():
                             thumb_key = f"thumb{index}"
-                            files[thumb_key] = stack.enter_context(
-                                item.photo.path.open("rb")
-                            )
+                            thumb_bytes = create_telegram_thumbnail(item.photo.path)
+                            if thumb_bytes:
+                                thumb_io = io.BytesIO(thumb_bytes)
+                                files[thumb_key] = (f"thumb{index}.jpg", thumb_io, "image/jpeg")
+                            else:
+                                files[thumb_key] = stack.enter_context(
+                                    item.photo.path.open("rb")
+                                )
                             entry["thumbnail"] = f"attach://{thumb_key}"
                         media.append(entry)
                     elif item.photo:
@@ -394,10 +541,17 @@ class TelegramClient:
         caption: str | None = None,
         thumbnail: DownloadedMedia | None = None,
     ) -> list[int]:
+        meta = get_video_metadata(item.path)
         data = {
             "chat_id": self.config.channel_id,
             "supports_streaming": "true",
         }
+        if meta["width"] > 0:
+            data["width"] = str(meta["width"])
+        if meta["height"] > 0:
+            data["height"] = str(meta["height"])
+        if meta["duration"] > 0:
+            data["duration"] = str(meta["duration"])
         if caption:
             data["caption"] = caption
         files: dict[str, Any] = {}
@@ -405,9 +559,14 @@ class TelegramClient:
             with ExitStack() as stack:
                 files["video"] = stack.enter_context(item.path.open("rb"))
                 if thumbnail and thumbnail.path.exists():
-                    files["thumbnail"] = stack.enter_context(
-                        thumbnail.path.open("rb")
-                    )
+                    thumb_bytes = create_telegram_thumbnail(thumbnail.path)
+                    if thumb_bytes:
+                        thumb_io = io.BytesIO(thumb_bytes)
+                        files["thumbnail"] = ("thumb.jpg", thumb_io, "image/jpeg")
+                    else:
+                        files["thumbnail"] = stack.enter_context(
+                            thumbnail.path.open("rb")
+                        )
                 result = self._call("sendVideo", data, files)
             return self._message_ids(result)
         except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
@@ -457,6 +616,8 @@ class TelegramClient:
                 for value in files.values():
                     if hasattr(value, "seek"):
                         value.seek(0)
+                    elif isinstance(value, tuple) and len(value) > 1 and hasattr(value[1], "seek"):
+                        value[1].seek(0)
             try:
                 response = request_session.post(
                     f"{self.base_url}/{method}",

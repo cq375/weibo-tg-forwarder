@@ -416,3 +416,72 @@ def test_live_album_fallback_when_live_group_rejected(tmp_path, monkeypatch):
     msg_ids = client.send_post(post, media)
     assert calls == ["sendMessage", "sendMediaGroup", "sendMediaGroup", "sendVideo"]
     assert msg_ids == [1, 3, 4]
+
+
+def test_send_video_includes_dimensions_when_available(tmp_path, monkeypatch):
+    from weibo_tg.models import DownloadedMedia
+    from weibo_tg.telegram import TelegramClient
+
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    video_path = tmp_path / "vid.mp4"
+    video_path.write_bytes(b"dummy")
+
+    # mock get_video_metadata
+    monkeypatch.setattr(
+        "weibo_tg.telegram.get_video_metadata",
+        lambda _path: {"width": 1080, "height": 1920, "duration": 15},
+    )
+
+    calls = []
+    def call(method, data=None, files=None):
+        calls.append((method, data, files))
+        return {"message_id": 1}
+
+    monkeypatch.setattr(client, "_call", call)
+
+    res = client._send_video(DownloadedMedia("video", video_path, 0, "url"))
+    assert res == [1]
+    assert calls[0][0] == "sendVideo"
+    assert calls[0][1]["width"] == "1080"
+    assert calls[0][1]["height"] == "1920"
+    assert calls[0][1]["duration"] == "15"
+
+
+def test_send_visual_group_includes_dimensions_for_live_video(tmp_path, monkeypatch):
+    from weibo_tg.models import DownloadedMedia
+    from weibo_tg.telegram import TelegramClient, PairedMedia
+    import json
+
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    photo_path = tmp_path / "photo.jpg"
+    photo_path.write_bytes(b"dummy")
+    video_path = tmp_path / "vid.mov"
+    video_path.write_bytes(b"dummy")
+
+    monkeypatch.setattr(
+        "weibo_tg.telegram.get_video_metadata",
+        lambda _path: {"width": 1440, "height": 1920, "duration": 2},
+    )
+
+    calls = []
+    def call(method, data=None, files=None):
+        calls.append((method, data, files))
+        return [{"message_id": 1}, {"message_id": 2}]
+
+    monkeypatch.setattr(client, "_call", call)
+
+    group = [
+        PairedMedia("live_photo", photo=DownloadedMedia("image", photo_path, 0, "u1"), video=DownloadedMedia("live_photo_video", video_path, 1, "u2")),
+        PairedMedia("image", photo=DownloadedMedia("image", photo_path, 2, "u3")),
+    ]
+    res = client._send_visual_group(group)
+    assert res == [1, 2]
+    payload = json.loads(calls[0][1]["media"])
+    assert payload[0]["type"] == "video"
+    assert payload[0]["width"] == 1440
+    assert payload[0]["height"] == 1920
+    assert payload[0]["duration"] == 2
