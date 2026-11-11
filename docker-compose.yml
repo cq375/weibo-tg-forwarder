@@ -5,6 +5,8 @@ services:
     build: .
     restart: unless-stopped
     shm_size: "512mb"
+    environment:
+      - PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/chrome-for-testing/chrome-linux64/chrome
     env_file:
       - .env
     volumes:
@@ -21,6 +23,8 @@ services:
     build: .
     restart: unless-stopped
     shm_size: "512mb"
+    environment:
+      - PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/chrome-for-testing/chrome-linux64/chrome
     env_file:
       - .env
     volumes:

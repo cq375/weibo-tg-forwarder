@@ -34,6 +34,7 @@ def test_launch_options_use_sandboxed_chrome_on_macos(tmp_path, monkeypatch):
     chrome.write_bytes(b"binary")
     monkeypatch.setattr(cookie_refresh.sys, "platform", "darwin")
     monkeypatch.setattr(cookie_refresh, "MACOS_CHROME", chrome)
+    monkeypatch.setattr(WeiboQrRefresher, "_is_container", classmethod(lambda cls: False))
     monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", raising=False)
 
     options = WeiboQrRefresher._launch_options()
@@ -60,6 +61,7 @@ def test_launch_options_keep_container_root_compatible(monkeypatch):
 def test_launch_options_use_bundled_chromium_without_root(monkeypatch):
     monkeypatch.setattr(cookie_refresh.sys, "platform", "linux")
     monkeypatch.setattr(cookie_refresh.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(WeiboQrRefresher, "_is_container", classmethod(lambda cls: False))
     monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", raising=False)
 
     options = WeiboQrRefresher._launch_options()
@@ -68,3 +70,32 @@ def test_launch_options_use_bundled_chromium_without_root(monkeypatch):
     assert "--no-sandbox" not in options["args"]
     assert "channel" not in options
     assert "executable_path" not in options
+
+
+def test_launch_options_custom_executable_in_container_root(tmp_path, monkeypatch):
+    chrome = tmp_path / "chrome"
+    chrome.write_bytes(b"binary")
+    monkeypatch.setattr(cookie_refresh.sys, "platform", "linux")
+    monkeypatch.setattr(cookie_refresh.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", str(chrome))
+
+    options = WeiboQrRefresher._launch_options()
+
+    assert options["executable_path"] == str(chrome)
+    assert options["chromium_sandbox"] is False
+    assert "--no-sandbox" in options["args"]
+
+
+def test_launch_options_custom_executable_in_container_non_root(tmp_path, monkeypatch):
+    chrome = tmp_path / "chrome"
+    chrome.write_bytes(b"binary")
+    monkeypatch.setattr(cookie_refresh.sys, "platform", "linux")
+    monkeypatch.setattr(cookie_refresh.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(WeiboQrRefresher, "_is_container", classmethod(lambda cls: True))
+    monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", str(chrome))
+
+    options = WeiboQrRefresher._launch_options()
+
+    assert options["executable_path"] == str(chrome)
+    assert options["chromium_sandbox"] is False
+    assert "--no-sandbox" in options["args"]

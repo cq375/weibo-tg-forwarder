@@ -84,6 +84,10 @@ class WeiboQrRefresher:
         return None
 
     @classmethod
+    def _is_container(cls) -> bool:
+        return Path("/.dockerenv").exists() or bool(os.getenv("DOCKER_CONTAINER"))
+
+    @classmethod
     def _launch_options(cls) -> dict:
         executable = cls._chrome_executable()
         options = {
@@ -92,19 +96,21 @@ class WeiboQrRefresher:
         }
         if executable is not None:
             options["executable_path"] = str(executable)
-            options["chromium_sandbox"] = True
-            return options
-        if sys.platform == "darwin":
+        elif sys.platform == "darwin":
             raise CookieRefreshError(
                 "本机未找到 Google Chrome，请安装 Chrome，"
                 "或用 PLAYWRIGHT_CHROMIUM_EXECUTABLE 指定浏览器路径"
             )
-        # The official Playwright container runs as root by default, and
-        # Chromium refuses to start with its sandbox in that environment.
+
+        # In Docker containers or when running as root, Chromium cannot start with
+        # its unprivileged user-namespace sandbox and requires --no-sandbox.
         is_root = getattr(os, "geteuid", lambda: 1000)() == 0
-        options["chromium_sandbox"] = not is_root
-        if is_root:
-            options["args"].insert(0, "--no-sandbox")
+        if is_root or cls._is_container():
+            options["chromium_sandbox"] = False
+            if "--no-sandbox" not in options["args"]:
+                options["args"].insert(0, "--no-sandbox")
+        else:
+            options["chromium_sandbox"] = True
         return options
 
     def _save_qr(self, context, qr) -> None:
