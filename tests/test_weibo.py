@@ -223,3 +223,55 @@ def test_candidate_cookie_validation_does_not_replace_active_session(monkeypatch
     assert counts == {"1000000001": 1, "1000000002": 1}
     assert weibo.authenticated is active_session
     assert all(session is not active_session for session, _uid, _page in calls)
+
+
+def test_filter_target_mblogs_filters_likes_promotions_and_non_target_uids():
+    target_uid = "1000000001"
+    items = [
+        # 1. 目标博主原创微博 -> 保留
+        {"idstr": "101", "user": {"id": 1000000001, "screen_name": "目标账号"}},
+        # 2. 目标博主转发他人微博 -> 保留
+        {
+            "idstr": "102",
+            "user": {"id": 1000000001, "screen_name": "目标账号"},
+            "retweeted_status": {"user": {"id": 9999999, "screen_name": "被转发者"}},
+        },
+        # 3. 博主点赞过的微博（dict 格式 title，如“她昨天14:42赞过的微博(2)”） -> 过滤
+        {
+            "idstr": "103",
+            "user": {"id": 2000000002, "screen_name": "被点赞博主"},
+            "title": {"text": "她昨天14:42赞过的微博(2)"},
+        },
+        # 4. 博主点赞过的微博（string 格式 title） -> 过滤
+        {
+            "idstr": "104",
+            "user": {"id": 2000000002, "screen_name": "被点赞博主"},
+            "title": "TA赞过的微博",
+        },
+        # 5. 商业广告微博（isAd=True） -> 过滤
+        {
+            "idstr": "105",
+            "user": {"id": 1000000001, "screen_name": "目标账号"},
+            "isAd": True,
+        },
+        # 6. 推广流微博（readtimetype=adMblog） -> 过滤
+        {
+            "idstr": "106",
+            "user": {"id": 1000000001, "screen_name": "目标账号"},
+            "readtimetype": "adMblog",
+        },
+        # 7. 促销推广微博（promotion 字段） -> 过滤
+        {
+            "idstr": "107",
+            "user": {"id": 1000000001, "screen_name": "目标账号"},
+            "promotion": {"type": "ad"},
+        },
+        # 8. 第三方非目标账号微博（如粉丝头条官方微博、新浪热点等） -> 过滤
+        {
+            "idstr": "108",
+            "user": {"id": 3587960280, "screen_name": "粉丝头条官方微博"},
+        },
+    ]
+
+    filtered = WeiboClient._filter_target_mblogs(items, target_uid)
+    assert [item["idstr"] for item in filtered] == ["101", "102"]

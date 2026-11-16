@@ -319,6 +319,9 @@ class ForwardService:
                 break
             encountered_known = False
             for post in page_posts:
+                if str(post.uid).strip() != str(uid).strip():
+                    LOGGER.warning("跳过非监控目标博文：%s (UID %s，监控目标 %s)", post.author, post.uid, uid)
+                    continue
                 if post.post_id in seen_ids:
                     continue
                 seen_ids.add(post.post_id)

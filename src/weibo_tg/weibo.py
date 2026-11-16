@@ -114,8 +114,9 @@ class WeiboClient:
                     if page == 1 and not mblogs:
                         raise WeiboFetchError("首页未返回微博，可能被匿名接口限流")
                     self._anonymous_blocked_until = 0.0
-                    LOGGER.info("微博 UID %s 第 %s 页由%s获取，共 %s 条", uid, page, source, len(mblogs))
-                    return [self._normalize_post(item, uid) for item in mblogs]
+                    filtered = self._filter_target_mblogs(mblogs, uid)
+                    LOGGER.info("微博 UID %s 第 %s 页由%s获取，共 %s 条（有效 %s 条）", uid, page, source, len(mblogs), len(filtered))
+                    return [self._normalize_post(item, uid) for item in filtered]
                 except (WeiboFetchError, requests.RequestException) as exc:
                     errors.append(f"{source}: {exc}")
         else:
@@ -140,8 +141,9 @@ class WeiboClient:
                     if page == 1 and not mblogs:
                         raise WeiboFetchError("首页未返回微博，请检查 Cookie 或账号状态")
                     self._preferred_authenticated_source = source
-                    LOGGER.info("微博 UID %s 第 %s 页由%s获取，共 %s 条", uid, page, source, len(mblogs))
-                    return [self._normalize_post(item, uid) for item in mblogs]
+                    filtered = self._filter_target_mblogs(mblogs, uid)
+                    LOGGER.info("微博 UID %s 第 %s 页由%s获取，共 %s 条（有效 %s 条）", uid, page, source, len(mblogs), len(filtered))
+                    return [self._normalize_post(item, uid) for item in filtered]
                 except (WeiboFetchError, requests.RequestException) as exc:
                     errors.append(f"{source}: {exc}")
         else:
@@ -165,7 +167,7 @@ class WeiboClient:
         mblogs = self._fetch_desktop(self.authenticated, uid, 1)
         if not mblogs:
             raise WeiboFetchError(f"新 Cookie 无法获取 UID {uid} 的首页微博")
-        return len(mblogs)
+        return len(self._filter_target_mblogs(mblogs, uid))
 
     def validate_cookie_candidate(self, cookie: str, uids: tuple[str, ...]) -> dict[str, int]:
         """Validate a new Cookie without mutating the active authenticated session."""
@@ -179,7 +181,7 @@ class WeiboClient:
                 mblogs = self._fetch_desktop(candidate, uid, 1)
                 if not mblogs:
                     raise WeiboFetchError(f"新 Cookie 无法获取 UID {uid} 的首页微博")
-                counts[uid] = len(mblogs)
+                counts[uid] = len(self._filter_target_mblogs(mblogs, uid))
             return counts
         finally:
             candidate.close()
@@ -264,6 +266,45 @@ class WeiboClient:
             if post_id and post_id not in seen:
                 seen.add(post_id)
                 result.append(item)
+        return result
+
+    @classmethod
+    def _filter_target_mblogs(
+        cls, items: list[dict[str, Any]], target_uid: str
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        target_uid_str = str(target_uid).strip()
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            if item.get("isAd"):
+                continue
+            if str(item.get("readtimetype") or "").lower() == "admblog":
+                continue
+            if item.get("promotion") or item.get("ad_state"):
+                continue
+
+            title_raw = item.get("title")
+            title_text = ""
+            if isinstance(title_raw, dict):
+                title_text = str(title_raw.get("text") or "")
+            elif isinstance(title_raw, str):
+                title_text = str(title_raw or "")
+            if title_text and any(
+                kw in title_text
+                for kw in ("赞过", "赞了", "点赞", "推广", "广告", "粉丝头条", "热点", "为你推荐")
+            ):
+                continue
+
+            user = item.get("user")
+            if isinstance(user, dict):
+                author_uid = str(user.get("idstr") or user.get("id") or "").strip()
+                if author_uid and author_uid != target_uid_str:
+                    continue
+
+            result.append(item)
         return result
 
     def _normalize_post(self, mblog: dict[str, Any], target_uid: str) -> WeiboPost:

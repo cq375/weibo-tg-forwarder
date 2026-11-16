@@ -13,11 +13,11 @@ from weibo_tg.state import StateStore
 from weibo_tg.telegram import TelegramDeliveryUnconfirmed
 
 
-def make_post(post_id: str) -> WeiboPost:
+def make_post(post_id: str, uid: str = "1000000001", author: str = "测试账号") -> WeiboPost:
     return WeiboPost(
         post_id=post_id,
-        uid="1000000001",
-        author="测试账号",
+        uid=uid,
+        author=author,
         text=f"微博 {post_id}",
         created_at=None,
         created_at_raw="",
@@ -470,3 +470,16 @@ def test_unconfirmed_telegram_delivery_is_not_retried_next_round(tmp_path):
         assert service.run_once() == (0, 1)
         assert state.status(item.post_id) == "delivery_unconfirmed"
         assert service.run_once() == (0, 0)
+
+
+def test_collect_posts_skips_posts_with_mismatched_target_uid(tmp_path):
+    config = make_config(tmp_path)
+    target_post = make_post("1001", uid="1000000001", author="目标博主")
+    alien_post = make_post("1002", uid="9999999999", author="路人博主")
+    weibo = FakeWeibo([target_post, alien_post])
+    telegram = FakeTelegram()
+
+    with StateStore(config.storage.database) as state:
+        service = ForwardService(config, weibo, FakeDownloader(), telegram, state)
+        collected = service._collect_posts("1000000001")
+        assert [post.post_id for post in collected] == ["1001"]
