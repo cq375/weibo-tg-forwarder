@@ -248,6 +248,60 @@ def test_non_object_delivery_response_is_unconfirmed(tmp_path, monkeypatch):
         client.send_message("123", "test")
 
 
+def test_media_uploads_use_extended_request_timeout(monkeypatch):
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    timeouts = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"ok": True, "result": {"message_id": 1}}
+
+    def post(_url, **_kwargs):
+        timeouts.append(_kwargs["timeout"])
+        return Response()
+
+    monkeypatch.setattr(client.session, "post", post)
+
+    client._call("sendMessage", {"chat_id": "@channel", "text": "text"})
+    client._call("sendVideo", {"chat_id": "@channel"}, {})
+
+    assert timeouts == [30, 300]
+
+
+def test_explicit_server_error_is_retryable(monkeypatch):
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    monkeypatch.setattr("weibo_tg.telegram.time.sleep", lambda _seconds: None)
+    calls = 0
+
+    class Response:
+        status_code = 500
+        text = "Internal Server Error"
+
+        @staticmethod
+        def json():
+            return {"ok": False, "description": "Internal Server Error"}
+
+    def post(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return Response()
+
+    monkeypatch.setattr(client.session, "post", post)
+
+    with pytest.raises(TelegramDeliveryRetryable):
+        client.send_message("123", "test")
+
+    assert calls == 3
+
+
 def test_douyin_live_album_groups_stills_before_motion(tmp_path, monkeypatch):
     from weibo_tg.models import DownloadedMedia, DouyinPost
 
@@ -286,14 +340,14 @@ def test_douyin_live_album_groups_stills_before_motion(tmp_path, monkeypatch):
 
     import json
     assert client.send_post(post, media) == [1, 2]
-    assert calls[0][0] == "sendMessage"
-    assert calls[1][0] == "sendMediaGroup"
-    media_payload = json.loads(calls[1][1]["media"])
+    assert calls[0][0] == "sendMediaGroup"
+    assert calls[1][0] == "sendMessage"
+    media_payload = json.loads(calls[0][1]["media"])
     assert len(media_payload) == 2
     assert media_payload[0]["type"] == "video"
     assert media_payload[1]["type"] == "video"
-    assert "thumb0" in calls[1][2] and "vid0" in calls[1][2]
-    assert "thumb1" in calls[1][2] and "vid1" in calls[1][2]
+    assert "thumb0" in calls[0][2] and "vid0" in calls[0][2]
+    assert "thumb1" in calls[0][2] and "vid1" in calls[0][2]
 
 
 def test_weibo_live_media_keeps_original_still_then_motion_order(
@@ -332,14 +386,14 @@ def test_weibo_live_media_keeps_original_still_then_motion_order(
 
     import json
     assert client.send_post(post, media) == [1, 2]
-    assert calls[0][0] == "sendMessage"
-    assert calls[1][0] == "sendMediaGroup"
-    media_payload = json.loads(calls[1][1]["media"])
+    assert calls[0][0] == "sendMediaGroup"
+    assert calls[1][0] == "sendMessage"
+    media_payload = json.loads(calls[0][1]["media"])
     assert len(media_payload) == 2
     assert media_payload[0]["type"] == "video"
     assert media_payload[1]["type"] == "photo"
-    assert "thumb0" in calls[1][2] and "vid0" in calls[1][2]
-    assert "pic1" in calls[1][2]
+    assert "thumb0" in calls[0][2] and "vid0" in calls[0][2]
+    assert "pic1" in calls[0][2]
 
 
 def test_single_live_photo_uses_send_video(tmp_path, monkeypatch):
@@ -367,6 +421,15 @@ def test_single_live_photo_uses_send_video(tmp_path, monkeypatch):
         item.path.write_bytes(b"x")
     calls = []
 
+    monkeypatch.setattr(
+        "weibo_tg.telegram.get_video_metadata",
+        lambda _path: {"width": 1920, "height": 1440, "duration": 2},
+    )
+    monkeypatch.setattr(
+        "weibo_tg.telegram.get_image_dimensions",
+        lambda _path: (1920, 2560),
+    )
+
     def call(method, data=None, files=None):
         calls.append((method, data, files))
         return {"message_id": len(calls)}
@@ -374,9 +437,11 @@ def test_single_live_photo_uses_send_video(tmp_path, monkeypatch):
     monkeypatch.setattr(client, "_call", call)
 
     assert client.send_post(post, media) == [1, 2]
-    assert calls[0][0] == "sendMessage"
-    assert calls[1][0] == "sendVideo"
-    assert "video" in calls[1][2] and "thumbnail" in calls[1][2]
+    assert calls[0][0] == "sendVideo"
+    assert calls[1][0] == "sendMessage"
+    assert "video" in calls[0][2] and "thumbnail" in calls[0][2]
+    assert calls[0][1]["width"] == "1920"
+    assert calls[0][1]["height"] == "2560"
 
 
 def test_live_album_fallback_when_live_group_rejected(tmp_path, monkeypatch):
@@ -407,15 +472,15 @@ def test_live_album_fallback_when_live_group_rejected(tmp_path, monkeypatch):
 
     def call(method, data=None, files=None):
         calls.append(method)
-        if method == "sendMediaGroup" and len(calls) == 2:
+        if method == "sendMediaGroup" and len(calls) == 1:
             raise TelegramError("live photo not supported")
         return {"message_id": len(calls)}
 
     monkeypatch.setattr(client, "_call", call)
 
     msg_ids = client.send_post(post, media)
-    assert calls == ["sendMessage", "sendMediaGroup", "sendMediaGroup", "sendVideo"]
-    assert msg_ids == [1, 3, 4]
+    assert calls == ["sendMediaGroup", "sendMediaGroup", "sendVideo", "sendMessage"]
+    assert msg_ids == [2, 3, 4]
 
 
 def test_send_video_includes_dimensions_when_available(tmp_path, monkeypatch):
@@ -449,7 +514,9 @@ def test_send_video_includes_dimensions_when_available(tmp_path, monkeypatch):
     assert calls[0][1]["duration"] == "15"
 
 
-def test_send_visual_group_includes_dimensions_for_live_video(tmp_path, monkeypatch):
+def test_send_visual_group_uses_still_dimensions_for_live_video(
+    tmp_path, monkeypatch
+):
     from weibo_tg.models import DownloadedMedia
     from weibo_tg.telegram import TelegramClient, PairedMedia
     import json
@@ -464,7 +531,11 @@ def test_send_visual_group_includes_dimensions_for_live_video(tmp_path, monkeypa
 
     monkeypatch.setattr(
         "weibo_tg.telegram.get_video_metadata",
-        lambda _path: {"width": 1440, "height": 1920, "duration": 2},
+        lambda _path: {"width": 1920, "height": 1440, "duration": 2},
+    )
+    monkeypatch.setattr(
+        "weibo_tg.telegram.get_image_dimensions",
+        lambda _path: (1920, 2560),
     )
 
     calls = []
@@ -482,6 +553,41 @@ def test_send_visual_group_includes_dimensions_for_live_video(tmp_path, monkeypa
     assert res == [1, 2]
     payload = json.loads(calls[0][1]["media"])
     assert payload[0]["type"] == "video"
-    assert payload[0]["width"] == 1440
-    assert payload[0]["height"] == 1920
+    assert payload[0]["width"] == 1920
+    assert payload[0]["height"] == 2560
     assert payload[0]["duration"] == 2
+
+
+def test_media_is_sent_before_text_when_text_times_out(tmp_path, monkeypatch):
+    from weibo_tg.models import DownloadedMedia, DouyinPost
+
+    client = TelegramClient(
+        TelegramConfig("token", "@channel", "https://api.telegram.org", 30)
+    )
+    post = DouyinPost(
+        post_id="7710261642327954426",
+        uid="account",
+        sec_uid="sec",
+        author="作者",
+        text="视频测试",
+        created_at=None,
+        created_at_raw="",
+        url="https://www.douyin.com/video/7710261642327954426",
+    )
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"dummy")
+    media = [DownloadedMedia("video", video_path, 0, "https://example/video")]
+    calls = []
+
+    def call(method, data=None, files=None):
+        calls.append(method)
+        if method == "sendMessage":
+            raise TelegramDeliveryUnconfirmed("sendMessage timeout")
+        return {"message_id": 1}
+
+    monkeypatch.setattr(client, "_call", call)
+
+    with pytest.raises(TelegramDeliveryUnconfirmed):
+        client.send_post(post, media)
+
+    assert calls == ["sendVideo", "sendMessage"]

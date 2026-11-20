@@ -148,6 +148,20 @@ def get_image_dimensions(path: Path) -> tuple[int, int]:
         return 0, 0
 
 
+def get_video_presentation_metadata(
+    path: Path, thumbnail: Path | None = None
+) -> dict[str, int]:
+    meta = get_video_metadata(path)
+    if thumbnail is not None and thumbnail.exists():
+        photo_width, photo_height = get_image_dimensions(thumbnail)
+        if photo_width > 0 and photo_height > 0:
+            # Live Photo videos can be stored sideways while the visible cover is
+            # portrait. Telegram sizes the album tile from these fields.
+            meta["width"] = photo_width
+            meta["height"] = photo_height
+    return meta
+
+
 def create_telegram_thumbnail(path: Path, max_dimension: int = 320) -> bytes | None:
     try:
         from PIL import Image
@@ -275,6 +289,13 @@ class TelegramClient:
 
     def send_post(self, post: Post, media: list[DownloadedMedia]) -> list[int]:
         message_ids: list[int] = []
+        if isinstance(post, DouyinPost):
+            message_ids.extend(self._send_douyin_media(media))
+        else:
+            message_ids.extend(self._send_weibo_media(media))
+
+        # Media goes first so a slow or timed-out text request can never leave a
+        # post with only its link while the downloaded video was skipped.
         for chunk in self._split_text(self.format_post(post)):
             result = self._call(
                 "sendMessage",
@@ -285,11 +306,6 @@ class TelegramClient:
                 },
             )
             message_ids.extend(self._message_ids(result))
-
-        if isinstance(post, DouyinPost):
-            message_ids.extend(self._send_douyin_media(media))
-        else:
-            message_ids.extend(self._send_weibo_media(media))
         return message_ids
 
     @staticmethod
@@ -383,13 +399,12 @@ class TelegramClient:
                         files[vid_key] = stack.enter_context(
                             item.video.path.open("rb")
                         )
-                        meta = get_video_metadata(item.video.path)
+                        meta = get_video_presentation_metadata(
+                            item.video.path,
+                            item.photo.path if item.photo else None,
+                        )
                         width = meta["width"]
                         height = meta["height"]
-                        if (width <= 0 or height <= 0) and item.photo and item.photo.path.exists():
-                            pw, ph = get_image_dimensions(item.photo.path)
-                            if pw > 0 and ph > 0:
-                                width, height = pw, ph
 
                         entry: dict[str, Any] = {
                             "type": "video",
@@ -541,7 +556,10 @@ class TelegramClient:
         caption: str | None = None,
         thumbnail: DownloadedMedia | None = None,
     ) -> list[int]:
-        meta = get_video_metadata(item.path)
+        meta = get_video_presentation_metadata(
+            item.path,
+            thumbnail.path if thumbnail else None,
+        )
         data = {
             "chat_id": self.config.channel_id,
             "supports_streaming": "true",
@@ -603,6 +621,8 @@ class TelegramClient:
         request_session: requests.Session,
     ) -> Any:
         request_timeout = self.config.request_timeout_seconds
+        if method in {"sendAnimation", "sendMediaGroup", "sendVideo"}:
+            request_timeout = max(request_timeout, 300)
         if method == "getUpdates" and data is not None:
             request_timeout = min(
                 request_timeout,
@@ -641,9 +661,11 @@ class TelegramClient:
                     return payload.get("result")
                 description = payload.get("description") or response.text[:200]
                 last_error = f"Telegram {method} HTTP {response.status_code}: {description}"
-                if is_delivery and response.status_code in {500, 502, 503, 504}:
+                if is_delivery and response.status_code in {502, 503, 504}:
                     raise TelegramDeliveryUnconfirmed(last_error)
                 if response.status_code == 429 and is_delivery and attempt == attempts:
+                    raise TelegramDeliveryRetryable(last_error)
+                if response.status_code == 500 and is_delivery and attempt == attempts:
                     raise TelegramDeliveryRetryable(last_error)
                 if response.status_code not in {429, 500, 502, 503, 504}:
                     break
