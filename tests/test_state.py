@@ -68,3 +68,16 @@ def test_delivery_unconfirmed_is_not_a_retryable_status(tmp_path):
         state.mark_delivery_unconfirmed(item.post_id, "timeout")
 
         assert state.status(item.post_id) == "delivery_unconfirmed"
+
+
+def test_interrupted_processing_is_locked_as_unconfirmed(tmp_path):
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        item = post()
+        state.mark_processing(item)
+
+        assert state.recover_interrupted_processing(item.uid) == 1
+        assert state.status(item.post_id) == "delivery_unconfirmed"
+        row = state.connection.execute(
+            "SELECT error FROM posts WHERE post_id = ?", (item.post_id,)
+        ).fetchone()
+        assert "自动重试" in row["error"]

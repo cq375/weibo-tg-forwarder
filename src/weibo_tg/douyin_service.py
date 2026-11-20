@@ -37,6 +37,14 @@ class DouyinForwardService:
         self.stop_event = threading.Event()
         for uid, _sec_uid in config.douyin.targets:
             self.state.get_health_state(f"douyin_fetch:{uid}")
+            recovered = state.recover_interrupted_processing(uid)
+            if recovered:
+                LOGGER.warning(
+                    "抖音账号 %s 有 %s 条作品在发送期间中断，"
+                    "已锁定为结果未知，不自动补发",
+                    uid,
+                    recovered,
+                )
 
     def run_once(self) -> tuple[int, int]:
         assert self.config.douyin is not None
@@ -70,7 +78,7 @@ class DouyinForwardService:
             pending = [
                 post
                 for post in posts
-                if self.state.status(post.post_id) in {None, "failed", "processing"}
+                if self.state.status(post.post_id) in {None, "failed"}
             ]
             for post in sorted(pending, key=self._post_sort_key):
                 try:

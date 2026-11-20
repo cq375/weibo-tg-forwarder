@@ -132,6 +132,24 @@ class StateStore:
         )
         self.connection.commit()
 
+    def recover_interrupted_processing(self, uid: str) -> int:
+        """Stop interrupted sends from being repeated after a process restart."""
+        now = self._now()
+        cursor = self.connection.execute(
+            """
+            UPDATE posts
+            SET status = 'delivery_unconfirmed', error = ?, updated_at = ?
+            WHERE uid = ? AND status = 'processing'
+            """,
+            (
+                "进程在 Telegram 发送期间中断；为避免重复消息，未自动重试",
+                now,
+                uid,
+            ),
+        )
+        self.connection.commit()
+        return max(0, cursor.rowcount)
+
     def record_health_failure(self, key: str, error: str) -> sqlite3.Row:
         now = self._now()
         self.connection.execute(

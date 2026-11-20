@@ -198,3 +198,19 @@ def test_unconfirmed_delivery_is_not_retried(tmp_path):
         assert service.run_once() == (0, 1)
         assert state.status(post.post_id) == "delivery_unconfirmed"
         assert service.run_once() == (0, 0)
+
+
+def test_interrupted_processing_is_not_retried_after_restart(tmp_path):
+    config = make_config(tmp_path)
+    post = make_post("100", datetime.now(timezone.utc))
+    telegram = FakeTelegram()
+
+    with StateStore(tmp_path / "douyin.sqlite3") as state:
+        state.mark_processing(post)
+        service = DouyinForwardService(
+            config, FakeDouyin([post]), FakeDownloader(), telegram, state
+        )
+
+        assert service.run_once() == (0, 0)
+        assert telegram.sent == []
+        assert state.status(post.post_id) == "delivery_unconfirmed"

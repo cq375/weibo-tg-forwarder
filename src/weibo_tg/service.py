@@ -48,6 +48,14 @@ class ForwardService:
         self._command_state_lock = threading.Lock()
         self._manual_refresh_pending = False
         self._telegram_thread: threading.Thread | None = None
+        for uid in config.weibo.uids:
+            recovered = state.recover_interrupted_processing(uid)
+            if recovered:
+                LOGGER.warning(
+                    "UID %s 有 %s 条微博在发送期间中断，已锁定为结果未知，不自动补发",
+                    uid,
+                    recovered,
+                )
 
     def run_once(self) -> tuple[int, int]:
         sent = 0
@@ -73,7 +81,7 @@ class ForwardService:
             pending = [
                 post
                 for post in posts
-                if self.state.status(post.post_id) in {None, "failed", "processing"}
+                if self.state.status(post.post_id) in {None, "failed"}
             ]
             for post in sorted(pending, key=self._post_sort_key):
                 try:

@@ -472,6 +472,22 @@ def test_unconfirmed_telegram_delivery_is_not_retried_next_round(tmp_path):
         assert service.run_once() == (0, 0)
 
 
+def test_interrupted_processing_is_not_retried_after_restart(tmp_path):
+    config = make_config(tmp_path)
+    item = make_post("500000000000100")
+    telegram = FakeTelegram()
+
+    with StateStore(config.storage.database) as state:
+        state.mark_processing(item)
+        service = ForwardService(
+            config, FakeWeibo([item]), FakeDownloader(), telegram, state
+        )
+
+        assert service.run_once() == (0, 0)
+        assert telegram.sent == []
+        assert state.status(item.post_id) == "delivery_unconfirmed"
+
+
 def test_collect_posts_skips_posts_with_mismatched_target_uid(tmp_path):
     config = make_config(tmp_path)
     target_post = make_post("1001", uid="1000000001", author="目标博主")
