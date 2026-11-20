@@ -33,6 +33,10 @@ class TelegramDeliveryRetryable(TelegramError):
     """Telegram explicitly rejected a write before delivery, so a later retry is safe."""
 
 
+class TelegramDeliveryServerError(TelegramDeliveryRetryable):
+    """Telegram returned an explicit 500, so trying a remote media URL is safe."""
+
+
 @dataclass(frozen=True)
 class PairedMedia:
     kind: str  # "image", "live_photo", "video", "animation", "other"
@@ -450,13 +454,65 @@ class TelegramClient:
                     files,
                 )
             return self._message_ids(result)
-        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+        except TelegramDeliveryServerError as exc:
+            remote_ids = self._send_visual_group_by_url(group)
+            if remote_ids is not None:
+                LOGGER.warning(
+                    "Telegram 文件上传明确失败，已改用媒体网址发送九宫格：%s",
+                    exc,
+                )
+                return remote_ids
+            raise
+        except TelegramDeliveryRetryable:
+            raise
+        except TelegramDeliveryUnconfirmed:
             raise
         except TelegramError as exc:
             LOGGER.warning(
                 "实况合并九宫格发送失败，降级为普通相册加独立视频：%s", exc
             )
             return self._fallback_send_visual_group(group)
+
+    def _send_visual_group_by_url(
+        self, group: list[PairedMedia]
+    ) -> list[int] | None:
+        media: list[dict[str, Any]] = []
+        for item in group:
+            if item.kind == "live_photo" and item.video:
+                if not self._is_remote_url(item.video.source_url):
+                    return None
+                meta = get_video_presentation_metadata(
+                    item.video.path,
+                    item.photo.path if item.photo else None,
+                )
+                entry: dict[str, Any] = {
+                    "type": "video",
+                    "media": item.video.source_url,
+                    "supports_streaming": True,
+                }
+                if meta["width"] > 0:
+                    entry["width"] = meta["width"]
+                if meta["height"] > 0:
+                    entry["height"] = meta["height"]
+                if meta["duration"] > 0:
+                    entry["duration"] = meta["duration"]
+                if item.photo and self._is_remote_url(item.photo.source_url):
+                    entry["thumbnail"] = item.photo.source_url
+                media.append(entry)
+            elif item.photo:
+                if not self._is_remote_url(item.photo.source_url):
+                    return None
+                media.append({"type": "photo", "media": item.photo.source_url})
+        if not media:
+            return None
+        result = self._call(
+            "sendMediaGroup",
+            {
+                "chat_id": self.config.channel_id,
+                "media": json.dumps(media),
+            },
+        )
+        return self._message_ids(result)
 
     def _send_single_live_photo(
         self, photo: DownloadedMedia | None, video: DownloadedMedia
@@ -494,7 +550,24 @@ class TelegramClient:
                         {"photo": handle},
                     )
                 return self._message_ids(result)
-            except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+            except TelegramDeliveryServerError as exc:
+                if self._is_remote_url(item.source_url):
+                    LOGGER.warning(
+                        "Telegram 图片上传明确失败，已改用图片网址发送：%s",
+                        exc,
+                    )
+                    result = self._call(
+                        "sendPhoto",
+                        {
+                            "chat_id": self.config.channel_id,
+                            "photo": item.source_url,
+                        },
+                    )
+                    return self._message_ids(result)
+                raise
+            except TelegramDeliveryRetryable:
+                raise
+            except TelegramDeliveryUnconfirmed:
                 raise
             except TelegramError:
                 LOGGER.warning("图片无法按照片发送，改为文件发送：%s", item.path)
@@ -514,7 +587,27 @@ class TelegramClient:
                     files,
                 )
             return self._message_ids(result)
-        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+        except TelegramDeliveryServerError as exc:
+            if all(self._is_remote_url(item.source_url) for item in items):
+                payload = [
+                    {"type": "photo", "media": item.source_url} for item in items
+                ]
+                LOGGER.warning(
+                    "Telegram 图片上传明确失败，已改用图片网址发送相册：%s",
+                    exc,
+                )
+                result = self._call(
+                    "sendMediaGroup",
+                    {
+                        "chat_id": self.config.channel_id,
+                        "media": json.dumps(payload),
+                    },
+                )
+                return self._message_ids(result)
+            raise
+        except TelegramDeliveryRetryable:
+            raise
+        except TelegramDeliveryUnconfirmed:
             raise
         except TelegramError as exc:
             LOGGER.warning("图片相册发送失败，改为逐张图片发送：%s", exc)
@@ -544,7 +637,24 @@ class TelegramClient:
                     {"animation": handle},
                 )
             return self._message_ids(result)
-        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+        except TelegramDeliveryServerError as exc:
+            if self._is_remote_url(item.source_url):
+                LOGGER.warning(
+                    "Telegram 动图上传明确失败，已改用动图网址发送：%s",
+                    exc,
+                )
+                result = self._call(
+                    "sendAnimation",
+                    {
+                        "chat_id": self.config.channel_id,
+                        "animation": item.source_url,
+                    },
+                )
+                return self._message_ids(result)
+            raise
+        except TelegramDeliveryRetryable:
+            raise
+        except TelegramDeliveryUnconfirmed:
             raise
         except TelegramError:
             LOGGER.warning("动图无法按动画发送，改为文件发送：%s", item.path)
@@ -587,7 +697,26 @@ class TelegramClient:
                         )
                 result = self._call("sendVideo", data, files)
             return self._message_ids(result)
-        except (TelegramDeliveryUnconfirmed, TelegramDeliveryRetryable):
+        except TelegramDeliveryServerError as exc:
+            if self._is_remote_url(item.source_url):
+                LOGGER.warning(
+                    "Telegram 视频上传明确失败，已改用视频网址发送：%s",
+                    exc,
+                )
+                remote_data = {
+                    key: value
+                    for key, value in data.items()
+                    if key != "thumbnail"
+                }
+                remote_data["video"] = item.source_url
+                if thumbnail and self._is_remote_url(thumbnail.source_url):
+                    remote_data["thumbnail"] = thumbnail.source_url
+                result = self._call("sendVideo", remote_data)
+                return self._message_ids(result)
+            raise
+        except TelegramDeliveryRetryable:
+            raise
+        except TelegramDeliveryUnconfirmed:
             raise
         except TelegramError:
             LOGGER.warning("视频无法按流媒体发送，改为文件发送：%s", item.path)
@@ -601,6 +730,10 @@ class TelegramClient:
                 {"document": handle},
             )
         return self._message_ids(result)
+
+    @staticmethod
+    def _is_remote_url(value: str) -> bool:
+        return value.startswith(("http://", "https://"))
 
     def _call(
         self,
@@ -666,7 +799,7 @@ class TelegramClient:
                 if response.status_code == 429 and is_delivery and attempt == attempts:
                     raise TelegramDeliveryRetryable(last_error)
                 if response.status_code == 500 and is_delivery and attempt == attempts:
-                    raise TelegramDeliveryRetryable(last_error)
+                    raise TelegramDeliveryServerError(last_error)
                 if response.status_code not in {429, 500, 502, 503, 504}:
                     break
                 retry_after = payload.get("parameters", {}).get("retry_after", attempt)
